@@ -35,9 +35,15 @@ jobs:
         key: ${{ runner.os }}-zydis-${{ matrix.configuration }}-v1
 
     - name: Install Meson & Ninja
+      shell: pwsh
       run: |
+        Write-Host "Installing meson and ninja for Python..."
         python -m pip install --upgrade pip
-        python -m pip install meson ninja
+        # install without pip cache to ensure fresh install on runner
+        python -m pip install --upgrade meson ninja --no-cache-dir
+        Write-Host "Verifying meson installation..."
+        python -m pip show meson
+        python -c "import meson; print('meson version', meson.__version__)"
 
     - name: Configure & build Zydis with Meson
       shell: pwsh
