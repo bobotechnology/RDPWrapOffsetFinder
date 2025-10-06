@@ -40,18 +40,20 @@ jobs:
         python -m pip install meson ninja
 
     - name: Configure & build Zydis with Meson
+      shell: pwsh
       run: |
         cd zydis
         git submodule update --init --recursive
         # Use meson build system (Zydis supports meson); create builddir per configuration
-        mkdir -p builddir
-        if [ "${{ matrix.configuration }}" = "Debug" ]; then
-          meson setup builddir --buildtype=debug -Dexamples=false -Dtests=false || meson setup --reconfigure builddir --buildtype=debug -Dexamples=false -Dtests=false
-          meson compile -C builddir
-        else
-          meson setup builddir --buildtype=release -Dexamples=false -Dtests=false || meson setup --reconfigure builddir --buildtype=release -Dexamples=false -Dtests=false
-          meson compile -C builddir
-        fi
+        New-Item -ItemType Directory -Force -Path builddir | Out-Null
+        if ("${{ matrix.configuration }}" -eq "Debug") {
+          python -m meson setup builddir --buildtype=debug -Dexamples=false -Dtests=false || python -m meson setup --reconfigure builddir --buildtype=debug -Dexamples=false -Dtests=false
+          python -m meson compile -C builddir
+        }
+        else {
+          python -m meson setup builddir --buildtype=release -Dexamples=false -Dtests=false || python -m meson setup --reconfigure builddir --buildtype=release -Dexamples=false -Dtests=false
+          python -m meson compile -C builddir
+        }
 
     - name: Upload Zydis build artifact
       uses: actions/upload-artifact@v4
