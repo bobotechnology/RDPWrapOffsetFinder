@@ -27,6 +27,9 @@ wheels/
 *.manifest
 *.spec
 
+# Symbol cache
+.symcache/
+
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
