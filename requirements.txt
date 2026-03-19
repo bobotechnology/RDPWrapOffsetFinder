@@ -1,0 +1,10 @@
+# Runtime dependencies
+pefile>=2023.2.7
+iced-x86>=1.21.0
+
+# Development dependencies
+pytest>=7.0
+black>=22.0
+flake8>=4.0
+mypy>=0.950
+pyinstaller>=5.0

@@ -1,25 +1,82 @@
-# RDPWrapOffsetFinder
+# RDPWrap Offset Finder
 
-Automatically find offsets needed by RDPWrap and generate rdpwrap.ini
+A tool to find offsets in `termsrv.dll` for use with [RDPWrap](https://github.com/stascorp/rdpwrap) and generate corresponding `rdpwrap.ini` sections.
+
+## Features
+
+- Extracts RDPWrap offsets from `termsrv.dll`
+- Supports both symbol-based and heuristic analysis
+- Generates properly formatted INI sections
+- Handles both x86 and x64 architectures
+- Works with various Windows versions
+
+## Installation
+
+### Prerequisites
+
+- Python 3.9 or higher
+- Windows OS (since this analyzes Windows system files)
+
+### From Source
+
+```bash
+git clone <repository-url>
+cd rdpwrap-offset-finder
+pip install .
+```
+
+### Direct Install
+
+```bash
+pip install git+https://github.com/yourusername/rdpwrap-offset-finder.git
+```
 
 ## Usage
 
-Pass the path of termsrv.dll as command line argument. If not provided, default to current system's termsrv.dll in System32 directory.
+### Basic Usage
 
-## Compile
+```bash
+# Analyze default system termsrv.dll with symbol-based approach
+rdpwrap-offset-finder
 
-This project depends on [zydis](https://github.com/zyantific/zydis), you needed to build zydis first.
+# Analyze specific termsrv.dll file
+rdpwrap-offset-finder /path/to/termsrv.dll
 
-1. Use `git submodule update --init --recursive` to initialize the submodule
+# Use heuristic pattern search instead of PDB symbols
+rdpwrap-offset-finder --nosymbol
+```
 
-2. Open `zydis\msvc\Zydis.sln` and build DLL version of zydis
+### Options
 
-3. Open `RDPWrapOffsetFinder.sln` and start build
+- `termsrv`: Path to termsrv.dll (default: `%SystemRoot%\System32\termsrv.dll`)
+- `--nosymbol`: Use heuristic pattern search instead of PDB symbols
 
-4. After build, copy `dbghelp.dll` `symsrv.dll` `symsrv.yes` (you can find them in Windows SDK) and `Zydis.dll` (also `Zydis.pdb` if you want to debug) to the same directory of the EXE file
+## How It Works
 
-## Notes
+The tool works in two modes:
 
-- PDB symbol of `termsrv.dll` is needed. If the program outputs "Symbol not found", check your Internet connection to Microsoft symbol server. You can manually set environment variable `_NT_SYMBOL_PATH` to use a symbol proxy
+1. **Symbol-based** (default): Uses PDB files to locate functions and variables
+2. **Heuristic** (with `--nosymbol`): Uses pattern matching to find relevant code sections
 
-- If the required symbol is not available, you can try the `_nosymbol` version which manually search pattens. Using the `_nosymbol` version with 32bit binaries is not widely tested and may return wrong results
+Both approaches extract the same information but may be more or less reliable depending on the availability of symbols and the specific version of `termsrv.dll`.
+
+## Output Format
+
+The tool outputs INI sections that can be added to `rdpwrap.ini`:
+
+```ini
+[10.0.19041.4474]
+LocalOnlyPatch.x64=1
+LocalOnlyOffset.x64=93EB1
+LocalOnlyCode.x64=jmpshort
+SingleUserPatch.x64=1
+...
+```
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
