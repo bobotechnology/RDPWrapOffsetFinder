@@ -73,27 +73,50 @@ The tool outputs INI sections that can be added to `rdpwrap.ini`:
 
 ```ini
 [VERSION.BUILD.REVISION.NUMBER]
+; Enable local-only patch
 LocalOnlyPatch.Arch=FLAG_VALUE
+; Offset for local-only patch
 LocalOnlyOffset.Arch=HEX_OFFSET_VALUE
+; Code type for local-only patch (e.g., jmpshort, nop_N)
 LocalOnlyCode.Arch=CODE_TYPE
+
+; Enable single-user patch
 SingleUserPatch.Arch=FLAG_VALUE
+; Offset for single-user patch
 SingleUserOffset.Arch=HEX_OFFSET_VALUE
+; Code type for single-user patch (e.g., mov_eax_1_nop_N, nop_N)
 SingleUserCode.Arch=CODE_TYPE
+
+; Enable default policy patch
 DefPolicyPatch.Arch=FLAG_VALUE
+; Offset for default policy patch
 DefPolicyOffset.Arch=HEX_OFFSET_VALUE
+; Code type for default policy patch (e.g., CDefPolicy_Query_eax_rcx_jmp)
 DefPolicyCode.Arch=POLICY_CODE_TYPE
+
+; Enable SLInit hook
 SLInitHook.Arch=FLAG_VALUE
+; Offset for SLInit hook
 SLInitOffset.Arch=HEX_OFFSET_VALUE
+; Function name for SLInit
 SLInitFunc.Arch=FUNCTION_NAME
 
 [VERSION.BUILD.REVISION.NUMBER-SLInit]
+; Offset for bInitialized variable
 bInitialized.Arch      =HEX_OFFSET_VALUE
+; Offset for bServerSku variable
 bServerSku.Arch        =HEX_OFFSET_VALUE
+; Offset for lMaxUserSessions variable
 lMaxUserSessions.Arch  =HEX_OFFSET_VALUE
+; Offset for bAppServerAllowed variable
 bAppServerAllowed.Arch =HEX_OFFSET_VALUE
+; Offset for bRemoteConnAllowed variable
 bRemoteConnAllowed.Arch=HEX_OFFSET_VALUE
+; Offset for bMultimonAllowed variable
 bMultimonAllowed.Arch  =HEX_OFFSET_VALUE
+; Offset for ulMaxDebugSessions variable
 ulMaxDebugSessions.Arch=HEX_OFFSET_VALUE
+; Offset for bFUSEnabled variable
 bFUSEnabled.Arch       =HEX_OFFSET_VALUE
 ```
 
