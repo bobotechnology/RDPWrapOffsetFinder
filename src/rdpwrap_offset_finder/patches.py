@@ -220,13 +220,14 @@ def single_user_patch(
             x = insns[j]
             if ctx.bitness == 64:
                 if verify_slot_va is not None and _call_hits_iat_slot(x, verify_slot_va):
-                    n = x.len - 5
+                    n = max(0, x.len - 5)
+                    code_type = "mov_eax_1" if n == 0 else f"mov_eax_1_nop_{n}"
                     off_rva = int(x.ip - ctx.image_base)
                     return PatchResult(
                         lines=[
                             "SingleUserPatch.x64=1",
                             f"SingleUserOffset.x64={off_rva:X}",
-                            f"SingleUserCode.x64=mov_eax_1_nop_{n}",
+                            f"SingleUserCode.x64={code_type}",
                         ]
                     )
                 if x.mnemonic == Mnemonic.CMP and x.len <= 8 and x.op0_kind == OpKind.MEMORY and \
@@ -246,13 +247,14 @@ def single_user_patch(
                         )
             else:
                 if verify_slot_va is not None and _call_hits_iat_slot(x, verify_slot_va):
-                    n = x.len - 4
+                    n = max(0, x.len - 4)
+                    code_type = "pop_eax_add_esp_12" if n == 0 else f"pop_eax_add_esp_12_nop_{n}"
                     off_rva = int(x.ip - ctx.image_base)
                     return PatchResult(
                         lines=[
                             "SingleUserPatch.x86=1",
                             f"SingleUserOffset.x86={off_rva:X}",
-                            f"SingleUserCode.x86=pop_eax_add_esp_12_nop_{n}",
+                            f"SingleUserCode.x86={code_type}",
                         ]
                     )
                 if x.mnemonic == Mnemonic.CMP and x.len <= 8 and x.op0_kind == OpKind.MEMORY and \
@@ -287,22 +289,24 @@ def single_user_patch(
         for x in insns:
             if _call_hits_iat_slot(x, verify_slot_va):
                 if ctx.bitness == 64:
-                    n = x.len - 5
+                    n = max(0, x.len - 5)
+                    code_type = "mov_eax_1" if n == 0 else f"mov_eax_1_nop_{n}"
                     off_rva = int(x.ip - ctx.image_base)
                     return PatchResult(
                         lines=[
                             "SingleUserPatch.x64=1",
                             f"SingleUserOffset.x64={off_rva:X}",
-                            f"SingleUserCode.x64=mov_eax_1_nop_{n}",
+                            f"SingleUserCode.x64={code_type}",
                         ]
                     )
-                n = x.len - 4
+                n = max(0, x.len - 4)
+                code_type = "pop_eax_add_esp_12" if n == 0 else f"pop_eax_add_esp_12_nop_{n}"
                 off_rva = int(x.ip - ctx.image_base)
                 return PatchResult(
                     lines=[
                         "SingleUserPatch.x86=1",
                         f"SingleUserOffset.x86={off_rva:X}",
-                        f"SingleUserCode.x86=pop_eax_add_esp_12_nop_{n}",
+                        f"SingleUserCode.x86={code_type}",
                     ]
                 )
 

@@ -26,7 +26,8 @@ def load_memory_image(pe: pefile.PE) -> MemoryImage:
         va = int(sec.VirtualAddress)
         raw = sec.get_data()
         vsz = int(sec.Misc_VirtualSize)
-        img[va:va + min(len(raw), vsz)] = raw[:vsz]
+        copy_len = min(len(raw), vsz)
+        img[va:va + copy_len] = raw[:copy_len]
 
     image_base = int(pe.OPTIONAL_HEADER.ImageBase)
     is_64 = pe.OPTIONAL_HEADER.Magic == 0x20B

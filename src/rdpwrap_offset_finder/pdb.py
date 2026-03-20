@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import ssl
 import urllib.request
 import uuid
 from dataclasses import dataclass
@@ -66,7 +67,13 @@ def ensure_pdb_downloaded(pdb: PdbInfo, cache_root: Path, *, server: str = MS_SY
 
     url = f"{server}/{pdb.pdb_name}/{pdb.guid_age}/{pdb.pdb_name}"
     req = urllib.request.Request(url, headers={"User-Agent": "rdpwrap-offset-finder"})
-    with urllib.request.urlopen(req, timeout=60) as r:
+    
+    # Create SSL context with proper verification
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = True
+    ssl_ctx.verify_mode = ssl.CERT_REQUIRED
+    
+    with urllib.request.urlopen(req, timeout=60, context=ssl_ctx) as r:
         data = r.read()
     dst.write_bytes(data)
     return dst

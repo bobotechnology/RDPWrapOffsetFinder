@@ -39,9 +39,10 @@ def decode_linear(ctx: DisasmContext, start_va: int, max_len: int) -> list:
     """Decode up to max_len bytes starting at start_va."""
 
     rva = ctx.va_to_rva(start_va)
-    if rva < 0:
+    if rva < 0 or rva >= len(ctx.image):
         return []
-    data = ctx.image[rva:rva + max_len]
+    end = min(rva + max_len, len(ctx.image))
+    data = ctx.image[rva:end]
     dec = Decoder(ctx.bitness, data, ip=start_va)
     return list(dec)
 
