@@ -72,16 +72,29 @@ Both approaches extract the same information but may be more or less reliable de
 The tool outputs INI sections that can be added to `rdpwrap.ini`:
 
 ```ini
-[10.0.26100.7872]
-LocalOnlyPatch.x64=1
-LocalOnlyOffset.x64=93141
-LocalOnlyCode.x64=jmpshort
-SingleUserPatch.x64=1
-SingleUserOffset.x64=A022B
-SingleUserCode.x64=mov_eax_1_nop_2
-DefPolicyPatch.x64=1
-DefPolicyOffset.x64=9D19F
-DefPolicyCode.x64=CDefPolicy_Query_eax_rcx_jmp
+[VERSION.BUILD.REVISION.NUMBER]
+LocalOnlyPatch.Arch=1
+LocalOnlyOffset.Arch=OFFSET_HEX_VALUE
+LocalOnlyCode.Arch=jmpshort
+SingleUserPatch.Arch=1
+SingleUserOffset.Arch=OFFSET_HEX_VALUE
+SingleUserCode.Arch=mov_eax_1_nop_2
+DefPolicyPatch.Arch=1
+DefPolicyOffset.Arch=OFFSET_HEX_VALUE
+DefPolicyCode.Arch=CDefPolicy_Query_eax_rcx_jmp
+SLInitHook.Arch=1
+SLInitOffset.Arch=OFFSET_HEX_VALUE
+SLInitFunc.Arch=New_CSLQuery_Initialize
+
+[VERSION.BUILD.REVISION.NUMBER-SLInit]
+bInitialized.Arch      =OFFSET_HEX_VALUE
+bServerSku.Arch        =OFFSET_HEX_VALUE
+lMaxUserSessions.Arch  =OFFSET_HEX_VALUE
+bAppServerAllowed.Arch =OFFSET_HEX_VALUE
+bRemoteConnAllowed.Arch=OFFSET_HEX_VALUE
+bMultimonAllowed.Arch  =OFFSET_HEX_VALUE
+ulMaxDebugSessions.Arch=OFFSET_HEX_VALUE
+bFUSEnabled.Arch       =OFFSET_HEX_VALUE
 ```
 
 ## 🤝 Contributing
