@@ -114,7 +114,7 @@ def def_policy_patch(ctx: DisasmContext, start_rva: int) -> PatchResult | None:
                     lines=[
                         f"DefPolicyPatch.{arch}=1",
                         f"DefPolicyOffset.{arch}={off_rva:X}",
-                        f"DefPolicyCode.{arch}=CDefPolicy_Query_{reg1}_{reg2}{suffix}",
+                        f"DefPolicyCode.{arch}=CDefPolicy_Query_{reg1.lower()}_{reg2.lower()}{suffix}",
                     ]
                 )
 
@@ -149,7 +149,7 @@ def def_policy_patch(ctx: DisasmContext, start_rva: int) -> PatchResult | None:
                             lines=[
                                 "DefPolicyPatch.x64=1",
                                 f"DefPolicyOffset.x64={off_rva:X}",
-                                f"DefPolicyCode.x64=CDefPolicy_Query_{reg1}_{reg2}{suffix}",
+                                f"DefPolicyCode.x64=CDefPolicy_Query_{reg1.lower()}_{reg2.lower()}{suffix}",
                             ]
                         )
 
