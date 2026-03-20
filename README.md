@@ -73,28 +73,28 @@ The tool outputs INI sections that can be added to `rdpwrap.ini`:
 
 ```ini
 [VERSION.BUILD.REVISION.NUMBER]
-LocalOnlyPatch.Arch=1
-LocalOnlyOffset.Arch=OFFSET_HEX_VALUE
-LocalOnlyCode.Arch=jmpshort
-SingleUserPatch.Arch=1
-SingleUserOffset.Arch=OFFSET_HEX_VALUE
-SingleUserCode.Arch=mov_eax_1_nop_2
-DefPolicyPatch.Arch=1
-DefPolicyOffset.Arch=OFFSET_HEX_VALUE
-DefPolicyCode.Arch=CDefPolicy_Query_eax_rcx_jmp
-SLInitHook.Arch=1
-SLInitOffset.Arch=OFFSET_HEX_VALUE
-SLInitFunc.Arch=New_CSLQuery_Initialize
+LocalOnlyPatch.Arch=FLAG_VALUE
+LocalOnlyOffset.Arch=HEX_OFFSET_VALUE
+LocalOnlyCode.Arch=CODE_TYPE
+SingleUserPatch.Arch=FLAG_VALUE
+SingleUserOffset.Arch=HEX_OFFSET_VALUE
+SingleUserCode.Arch=CODE_TYPE
+DefPolicyPatch.Arch=FLAG_VALUE
+DefPolicyOffset.Arch=HEX_OFFSET_VALUE
+DefPolicyCode.Arch=POLICY_CODE_TYPE
+SLInitHook.Arch=FLAG_VALUE
+SLInitOffset.Arch=HEX_OFFSET_VALUE
+SLInitFunc.Arch=FUNCTION_NAME
 
 [VERSION.BUILD.REVISION.NUMBER-SLInit]
-bInitialized.Arch      =OFFSET_HEX_VALUE
-bServerSku.Arch        =OFFSET_HEX_VALUE
-lMaxUserSessions.Arch  =OFFSET_HEX_VALUE
-bAppServerAllowed.Arch =OFFSET_HEX_VALUE
-bRemoteConnAllowed.Arch=OFFSET_HEX_VALUE
-bMultimonAllowed.Arch  =OFFSET_HEX_VALUE
-ulMaxDebugSessions.Arch=OFFSET_HEX_VALUE
-bFUSEnabled.Arch       =OFFSET_HEX_VALUE
+bInitialized.Arch      =HEX_OFFSET_VALUE
+bServerSku.Arch        =HEX_OFFSET_VALUE
+lMaxUserSessions.Arch  =HEX_OFFSET_VALUE
+bAppServerAllowed.Arch =HEX_OFFSET_VALUE
+bRemoteConnAllowed.Arch=HEX_OFFSET_VALUE
+bMultimonAllowed.Arch  =HEX_OFFSET_VALUE
+ulMaxDebugSessions.Arch=HEX_OFFSET_VALUE
+bFUSEnabled.Arch       =HEX_OFFSET_VALUE
 ```
 
 ## 🤝 Contributing
