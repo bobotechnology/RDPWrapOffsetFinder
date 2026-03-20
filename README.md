@@ -72,12 +72,12 @@ Both approaches extract the same information but may be more or less reliable de
 The tool outputs INI sections that can be added to `rdpwrap.ini`:
 
 ```ini
-[VERSION.BUILD.REVISION.NUMBER]
+[VERSION_NUMBER]
 ; Enable local-only patch
 LocalOnlyPatch.Arch=FLAG_VALUE
 ; Offset for local-only patch
 LocalOnlyOffset.Arch=HEX_OFFSET_VALUE
-; Code type for local-only patch (e.g., jmpshort, nop_N)
+; Code type for local-only patch (e.g., jmpshort, nopjmp)
 LocalOnlyCode.Arch=CODE_TYPE
 
 ; Enable single-user patch
@@ -101,7 +101,7 @@ SLInitOffset.Arch=HEX_OFFSET_VALUE
 ; Function name for SLInit
 SLInitFunc.Arch=FUNCTION_NAME
 
-[VERSION.BUILD.REVISION.NUMBER-SLInit]
+[VERSION_NUMBER-SLInit]
 ; Offset for bInitialized variable
 bInitialized.Arch      =HEX_OFFSET_VALUE
 ; Offset for bServerSku variable
