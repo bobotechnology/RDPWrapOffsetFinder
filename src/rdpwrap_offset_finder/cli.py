@@ -9,7 +9,10 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .termsrv import analyze_termsrv
+try:
+    from .termsrv import analyze_termsrv
+except ImportError:
+    from rdpwrap_offset_finder.termsrv import analyze_termsrv
 
 
 def _create_argument_parser() -> argparse.ArgumentParser:
