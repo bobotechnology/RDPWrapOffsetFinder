@@ -23,7 +23,7 @@ A tool to find offsets in `termsrv.dll` for use with [RDPWrap](https://github.co
 ### From Source
 
 ```bash
-git clone https://github.com/llccd/rdpwrap-offset-finder.git
+git clone https://github.com/bobotechnology/RDPWrapOffsetFinder.git
 cd rdpwrap-offset-finder
 pip install -e .
 ```
@@ -31,7 +31,7 @@ pip install -e .
 ### Direct Install
 
 ```bash
-pip install git+https://github.com/llccd/rdpwrap-offset-finder.git
+pip install git+https://github.com/bobotechnology/RDPWrapOffsetFinder.git
 ```
 
 ## 📖 Usage
