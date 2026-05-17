@@ -16,12 +16,11 @@ MS_SYMBOL_SERVER = "https://msdl.microsoft.com/download/symbols"
 @dataclass(frozen=True)
 class PdbInfo:
     pdb_name: str
-    guid_hex: str  # 32 hex chars, upper
+    guid_hex: str
     age: int
 
     @property
     def guid_age(self) -> str:
-        # Symbol server directory name uses GUID (no dashes) + age.
         return f"{self.guid_hex}{self.age}"
 
 
@@ -30,8 +29,6 @@ def _u32(b: bytes, off: int) -> int:
 
 
 def get_pdb_info(pe: pefile.PE) -> PdbInfo:
-    """Extract PDB (RSDS) info from PE debug directory."""
-
     try:
         pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_DEBUG"]])
     except Exception:
@@ -39,7 +36,6 @@ def get_pdb_info(pe: pefile.PE) -> PdbInfo:
 
     entries = getattr(pe, "DIRECTORY_ENTRY_DEBUG", []) or []
     for e in entries:
-        # IMAGE_DEBUG_TYPE_CODEVIEW == 2
         if int(e.struct.Type) != 2:
             continue
         data = pe.get_data(int(e.struct.AddressOfRawData), int(e.struct.SizeOfData))
@@ -57,8 +53,6 @@ def get_pdb_info(pe: pefile.PE) -> PdbInfo:
 
 
 def ensure_pdb_downloaded(pdb: PdbInfo, cache_root: Path, *, server: str = MS_SYMBOL_SERVER) -> Path:
-    """Download PDB from Microsoft symbol server into a symsrv-like cache layout."""
-
     dst_dir = cache_root / pdb.pdb_name / pdb.guid_age
     dst_dir.mkdir(parents=True, exist_ok=True)
     dst = dst_dir / pdb.pdb_name
@@ -67,12 +61,11 @@ def ensure_pdb_downloaded(pdb: PdbInfo, cache_root: Path, *, server: str = MS_SY
 
     url = f"{server}/{pdb.pdb_name}/{pdb.guid_age}/{pdb.pdb_name}"
     req = urllib.request.Request(url, headers={"User-Agent": "rdpwrap-offset-finder"})
-    
-    # Create SSL context with proper verification
+
     ssl_ctx = ssl.create_default_context()
     ssl_ctx.check_hostname = True
     ssl_ctx.verify_mode = ssl.CERT_REQUIRED
-    
+
     with urllib.request.urlopen(req, timeout=60, context=ssl_ctx) as r:
         data = r.read()
     dst.write_bytes(data)

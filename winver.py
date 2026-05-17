@@ -31,17 +31,10 @@ class FileVersion:
 
 
 def get_file_version_from_vs_version_info(pe: pefile.PE) -> FileVersion:
-    """Return file version from VS_VERSIONINFO (VS_FIXEDFILEINFO).
-
-    C++ original reads resource type 16, id 1 (VS_VERSIONINFO). pefile exposes
-    VS_FIXEDFILEINFO when present.
-    """
-
     if hasattr(pe, "VS_FIXEDFILEINFO") and pe.VS_FIXEDFILEINFO:
         ffi = pe.VS_FIXEDFILEINFO[0]
         return FileVersion(ms=int(ffi.FileVersionMS), ls=int(ffi.FileVersionLS))
 
-    # Fallback: try parsing FileVersion string.
     if hasattr(pe, "FileInfo") and pe.FileInfo:
         for fi in pe.FileInfo:
             if fi.Key == b"StringFileInfo":

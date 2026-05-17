@@ -6,13 +6,13 @@ from pathlib import Path
 
 import pefile
 
-from .dbghelp import DbgHelp
-from .disasm import DisasmContext, decode_linear
-from .imports import find_iat_rva
-from .patches import def_policy_patch, local_only_patch, single_user_patch
-from .pe_image import load_memory_image
-from .pdb import ensure_pdb_downloaded, get_pdb_info
-from .winver import FileVersion
+from dbghelp import DbgHelp
+from disasm import DisasmContext, decode_linear
+from imports import find_iat_rva
+from patches import def_policy_patch, local_only_patch, single_user_patch
+from pe_image import load_memory_image
+from pdb import ensure_pdb_downloaded, get_pdb_info
+from winver import FileVersion
 
 
 @dataclass(frozen=True)
@@ -27,12 +27,10 @@ def _default_sym_path() -> str:
 
 
 def _sl_policy_cp(ctx: DisasmContext, start_rva: int) -> bool:
-    # Port of RDPWrapOffsetFinder.cpp::SLPolicyCP (only meaningful for x86).
     if ctx.bitness != 32:
         return False
     start_va = ctx.rva_to_va(start_rva)
     insns = decode_linear(ctx, start_va, 128)
-    # iced-x86 exposes enums (Mnemonic/OpKind/Register), not strings.
     from iced_x86 import Mnemonic, OpKind, Register
 
     for insn in insns:
@@ -54,21 +52,17 @@ def analyze(pe: pefile.PE, dll_path: Path, ver: FileVersion) -> SymbolResult:
 
     sym_path = _default_sym_path()
     with DbgHelp(search_path=sym_path) as dbg:
-        # Make symbol resolution more reliable by pre-downloading the exact PDB
-        # and adding it to the search path.
         try:
             pdb = get_pdb_info(pe)
             cache_root = Path(".symcache")
             pdb_path = ensure_pdb_downloaded(pdb, cache_root)
             dbg.add_symbol_path(str(pdb_path.parent))
         except Exception:
-            # Best-effort: fallback to SymFromName through normal symbol path.
             pass
 
         dbg.load_module(dll_path, mem.image_base, size_of_image)
         dbg.set_undname(True)
 
-        # Resolve RVAs needed by the patch logic.
         memset_iat = (
             find_iat_rva(pe, "msvcrt.dll", "memset")
             or find_iat_rva(pe, "ucrtbase.dll", "memset")
@@ -77,7 +71,6 @@ def analyze(pe: pefile.PE, dll_path: Path, ver: FileVersion) -> SymbolResult:
         if memset_iat is None:
             raise RuntimeError("memset import not found")
 
-        # VerifyVersionInfoW slot name differs across builds; try common import library variants.
         verify_iat = (
             find_iat_rva(pe, "api-ms-win-core-kernel32-legacy-l1-1-1.dll", "VerifyVersionInfoW")
             or find_iat_rva(pe, "kernel32.dll", "VerifyVersionInfoW")
@@ -85,16 +78,12 @@ def analyze(pe: pefile.PE, dll_path: Path, ver: FileVersion) -> SymbolResult:
             or find_iat_rva(pe, "kernel32.dll", "__imp__VerifyVersionInfoW@16")
         )
 
-        # Function entrypoints
-        # Prefer the CUtils implementation when present; the helper variant may
-        # resolve to a thin wrapper/dispatcher in some builds.
         su_rva = dbg.sym_rva("CUtils::IsSingleSessionPerUser")
         if su_rva is None:
             su_rva = dbg.sym_rva("CSessionArbitrationHelper::IsSingleSessionPerUserEnabled")
 
         dp_rva = dbg.sym_rva("CDefPolicy::Query")
 
-        # Post Win7 items
         getlic_rva = dbg.sym_rva("CEnforcementCore::GetInstanceOfTSLicense")
         islocal_rva = dbg.sym_rva("CSLQuery::IsLicenseTypeLocalOnly")
         cslinit_rva = dbg.sym_rva("CSLQuery::Initialize")
@@ -123,7 +112,6 @@ def analyze(pe: pefile.PE, dll_path: Path, ver: FileVersion) -> SymbolResult:
         else:
             lines.append("ERROR: CDefPolicy_Query not found")
 
-        # Version gating like the C++ tool
         if ver.ms <= 0x00060001:
             return SymbolResult(text="\n".join(lines) + "\n")
 
@@ -168,7 +156,6 @@ def analyze(pe: pefile.PE, dll_path: Path, ver: FileVersion) -> SymbolResult:
             ]
         )
 
-        # Global vars needed by rdpwrap.ini
         globals_ = [
             ("bServerSku", "CSLQuery::bServerSku"),
             ("bRemoteConnAllowed", "CSLQuery::bRemoteConnAllowed"),

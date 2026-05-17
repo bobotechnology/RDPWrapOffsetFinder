@@ -40,13 +40,6 @@ class SYMBOL_INFOW(ctypes.Structure):
 
 
 def _make_symbol_info(max_name_len: int = 1024) -> tuple[ctypes.Array, ctypes.POINTER(SYMBOL_INFOW)]:
-    """Allocate SYMBOL_INFOW buffer.
-
-    Important: the returned `buf` must be kept alive while calling SymFromNameW,
-    otherwise the pointer becomes invalid and SymFromNameW will scribble into
-    freed memory.
-    """
-
     size = ctypes.sizeof(SYMBOL_INFOW) + (max_name_len * ctypes.sizeof(wintypes.WCHAR))
     buf = ctypes.create_string_buffer(size)
     sym = ctypes.cast(buf, ctypes.POINTER(SYMBOL_INFOW))
@@ -57,8 +50,6 @@ def _make_symbol_info(max_name_len: int = 1024) -> tuple[ctypes.Array, ctypes.PO
 
 @dataclass
 class DbgHelp:
-    """Minimal DbgHelp wrapper used to resolve RVAs from PDB symbols."""
-
     search_path: str | None = None
 
     def __post_init__(self) -> None:
@@ -103,17 +94,12 @@ class DbgHelp:
         self._initialized = True
 
     def add_symbol_path(self, path: str) -> None:
-        """Append an additional symbol search directory."""
-
         if not self._initialized:
             self.initialize()
-        # DbgHelp uses ';' separated search paths.
         if not self.search_path:
             self.search_path = path
         elif path not in self.search_path:
             self.search_path = f"{self.search_path};{path}"
-        # Re-initialize with new path is simplest (cleanup+initialize).
-        # DbgHelp also supports SymSetSearchPath, but keeping surface minimal.
         self._dbg.SymCleanup(self._proc)
         self._initialized = False
         self.initialize()
@@ -143,7 +129,6 @@ class DbgHelp:
         return self._mod_base
 
     def set_undname(self, enable: bool) -> None:
-        # This mirrors the C++ tool which enables UNDNAME before resolving C++ names.
         if not self._initialized:
             self.initialize()
         opt = SYMOPT_DEBUG | (SYMOPT_UNDNAME if enable else 0)

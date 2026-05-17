@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from iced_x86 import Mnemonic, OpKind, Register
 
-from .disasm import DisasmContext, decode_linear, reg_name
+from disasm import DisasmContext, decode_linear, reg_name
 
 
 @dataclass(frozen=True)
@@ -83,7 +83,17 @@ def def_policy_patch(ctx: DisasmContext, start_rva: int) -> PatchResult | None:
     insns = decode_linear(ctx, start_va, 128)
     mov_base = Register.NONE
     mov_target = Register.NONE
-    last_len = 0
+    alias_map: dict[int, int] = {}
+
+    def _is_alias_of(reg: int, target: int) -> bool:
+        if reg == target:
+            return True
+        cur = alias_map.get(reg)
+        while cur is not None:
+            if cur == target:
+                return True
+            cur = alias_map.get(cur)
+        return False
 
     for idx, insn in enumerate(insns):
         if insn.mnemonic == Mnemonic.CMP and insn.op_count >= 2:
@@ -100,16 +110,20 @@ def def_policy_patch(ctx: DisasmContext, start_rva: int) -> PatchResult | None:
                 if idx + 1 >= len(insns):
                     return None
                 nxt = insns[idx + 1]
-                suffix = ""
-                ip_for_offset = insn.ip
-                if nxt.mnemonic == Mnemonic.JNE:
-                    ip_for_offset = insn.ip - last_len
-                    suffix = "_jmp"
-                elif nxt.mnemonic not in (Mnemonic.JE, Mnemonic.POP):
+                if nxt.mnemonic not in (Mnemonic.JE, Mnemonic.JNE, Mnemonic.POP):
                     return None
+                suffix = "_jmp" if nxt.mnemonic == Mnemonic.JNE else ""
 
                 arch = "x64" if ctx.bitness == 64 else "x86"
-                off_rva = int(ip_for_offset - ctx.image_base)
+                if suffix == "_jmp" and idx > 0 and \
+                   insns[idx - 1].mnemonic == Mnemonic.MOV and \
+                   insns[idx - 1].op0_kind == OpKind.REGISTER and \
+                   insns[idx - 1].op1_kind == OpKind.MEMORY and \
+                   insns[idx - 1].memory_displacement == 0x638 and \
+                   insns[idx - 1].op0_register == insn.op1_register:
+                    off_rva = int(insns[idx - 1].ip - ctx.image_base)
+                else:
+                    off_rva = int(insn.ip - ctx.image_base)
                 return PatchResult(
                     lines=[
                         f"DefPolicyPatch.{arch}=1",
@@ -122,38 +136,40 @@ def def_policy_patch(ctx: DisasmContext, start_rva: int) -> PatchResult | None:
            insn.op0_kind == OpKind.REGISTER and insn.op1_kind == OpKind.MEMORY and insn.memory_displacement == 0x63C:
             mov_base = insn.memory_base
             mov_target = insn.op0_register
-        elif ctx.bitness == 64 and mov_base != Register.NONE and insn.mnemonic == Mnemonic.MOV and \
-             insn.op0_kind == OpKind.REGISTER and insn.op1_kind == OpKind.MEMORY and \
-             insn.memory_base == mov_base and insn.memory_displacement == 0x638:
-            mov_target2 = insn.op0_register
-            for k in range(idx + 1, len(insns)):
-                cmpi = insns[k]
-                if cmpi.mnemonic == Mnemonic.CMP and cmpi.op0_kind == OpKind.REGISTER and cmpi.op1_kind == OpKind.REGISTER:
-                    if (cmpi.op0_register == mov_target and cmpi.op1_register == mov_target2) or \
-                       (cmpi.op0_register == mov_target2 and cmpi.op1_register == mov_target):
-                        if k + 1 >= len(insns):
-                            return None
-                        nxt = insns[k + 1]
-                        suffix = ""
-                        ip_for_offset = insn.ip
-                        if nxt.mnemonic == Mnemonic.JNE:
-                            ip_for_offset = insn.ip - last_len
-                            suffix = "_jmp"
-                        elif nxt.mnemonic not in (Mnemonic.JE, Mnemonic.POP):
-                            return None
+        elif ctx.bitness == 64 and mov_base != Register.NONE:
+            if insn.mnemonic == Mnemonic.MOV and insn.op0_kind == OpKind.REGISTER and insn.op1_kind == OpKind.REGISTER:
+                if insn.op1_register == mov_base or _is_alias_of(insn.op1_register, mov_base):
+                    alias_map[insn.op0_register] = insn.op1_register
 
-                        reg1 = reg_name(mov_target2)
-                        reg2 = reg_name(mov_base)
-                        off_rva = int(ip_for_offset - ctx.image_base)
-                        return PatchResult(
-                            lines=[
-                                "DefPolicyPatch.x64=1",
-                                f"DefPolicyOffset.x64={off_rva:X}",
-                                f"DefPolicyCode.x64=CDefPolicy_Query_{reg1.lower()}_{reg2.lower()}{suffix}",
-                            ]
-                        )
+            if insn.mnemonic == Mnemonic.MOV and \
+               insn.op0_kind == OpKind.REGISTER and insn.op1_kind == OpKind.MEMORY and \
+               insn.memory_displacement == 0x638 and \
+               (insn.memory_base == mov_base or _is_alias_of(insn.memory_base, mov_base)):
+                mov_target2 = insn.op0_register
+                alias_base = insn.memory_base
+                for k in range(idx + 1, len(insns)):
+                    cmpi = insns[k]
+                    if cmpi.mnemonic == Mnemonic.CMP and cmpi.op0_kind == OpKind.REGISTER and cmpi.op1_kind == OpKind.REGISTER:
+                        if (cmpi.op0_register == mov_target and cmpi.op1_register == mov_target2) or \
+                           (cmpi.op0_register == mov_target2 and cmpi.op1_register == mov_target):
+                            if k + 1 >= len(insns):
+                                return None
+                            nxt = insns[k + 1]
+                            if nxt.mnemonic not in (Mnemonic.JE, Mnemonic.JNE, Mnemonic.POP):
+                                return None
+                            suffix = "_jmp" if nxt.mnemonic == Mnemonic.JNE else ""
 
-        last_len = insn.len
+                            disp = insn.memory_displacement
+                            reg2 = reg_name(alias_base)
+                            off_rva = int(insn.ip - ctx.image_base)
+                            return PatchResult(
+                                lines=[
+                                    "DefPolicyPatch.x64=1",
+                                    f"DefPolicyOffset.x64={off_rva:X}",
+                                    f"DefPolicyCode.x64=CDefPolicy_Query_{disp:X}h_mem_{reg2.lower()}{suffix}",
+                                ]
+                            )
+
     return None
 
 

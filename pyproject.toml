@@ -44,15 +44,9 @@ dev = [
 ]
 
 [project.scripts]
-rdpwrap-offset-finder = "rdpwrap_offset_finder.cli:main"
+rdpwrap-offset-finder = "cli:main"
 
 [project.urls]
 Homepage = "https://github.com/bobotechnology/RDPWrapOffsetFinder"
 Repository = "https://github.com/bobotechnology/RDPWrapOffsetFinder"
 Issues = "https://github.com/bobotechnology/RDPWrapOffsetFinder/issues"
-
-[tool.setuptools]
-package-dir = {"" = "src"}
-
-[tool.setuptools.packages.find]
-where = ["src"]

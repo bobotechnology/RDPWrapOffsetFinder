@@ -29,6 +29,7 @@ wheels/
 
 # Symbol cache
 .symcache/
+log/
 
 # Installer logs
 pip-log.txt

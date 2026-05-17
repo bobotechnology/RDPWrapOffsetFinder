@@ -7,12 +7,6 @@ import pefile
 
 @dataclass(frozen=True)
 class MemoryImage:
-    """A PE loaded into memory as the Windows loader would map it.
-
-    This mirrors what the C++ `_nosymbol` tool does via VirtualAlloc + section copies,
-    enabling direct RVA/VA indexing for disassembly.
-    """
-
     pe: pefile.PE
     image_base: int
     image: bytes

@@ -13,12 +13,6 @@ class ImportFunction:
 
 
 def find_iat_rva(pe: pefile.PE, dll_name: str, func_name: str) -> int | None:
-    """Return IAT entry RVA for imported function, or None.
-
-    C++ `_nosymbol` uses this to find imported `memset` and `VerifyVersionInfoW`.
-    We return the RVA of the IAT slot.
-    """
-
     if not hasattr(pe, "DIRECTORY_ENTRY_IMPORT"):
         try:
             pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]])
@@ -34,6 +28,5 @@ def find_iat_rva(pe: pefile.PE, dll_name: str, func_name: str) -> int | None:
                 continue
             name = imp.name.decode(errors="ignore")
             if name.lower() == func_name.lower():
-                # `imp.address` is the VA at runtime; convert to RVA.
                 return int(imp.address) - int(pe.OPTIONAL_HEADER.ImageBase)
     return None

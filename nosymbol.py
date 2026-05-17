@@ -7,12 +7,12 @@ from datetime import datetime
 import pefile
 from iced_x86 import Decoder, Mnemonic, OpKind, Register
 
-from .disasm import DisasmContext
-from .exception_table import backtrace_x64, parse_exception_directory_x64
-from .imports import find_iat_rva
-from .patches import PatchResult, def_policy_patch, local_only_patch, single_user_patch
-from .pe_image import load_memory_image
-from .winver import FileVersion
+from disasm import DisasmContext
+from exception_table import backtrace_x64, parse_exception_directory_x64
+from imports import find_iat_rva
+from patches import PatchResult, def_policy_patch, local_only_patch, single_user_patch
+from pe_image import load_memory_image
+from winver import FileVersion
 
 
 def _find_section(pe: pefile.PE, name: bytes) -> pefile.SectionStructure | None:
@@ -178,11 +178,9 @@ def _xref_imm32_x86(image: bytes, image_base: int, func_rva: int, func_len: int,
     code = image[func_rva:func_rva + func_len]
     dec = Decoder(32, code, ip=start_va)
     for insn in dec:
-        # PUSH imm32
         if insn.mnemonic == Mnemonic.PUSH and insn.op0_kind == OpKind.IMMEDIATE32:
             if int(insn.immediate32) == target_va:
                 return int(insn.next_ip - image_base)
-        # MOV reg, imm32  (covers MOV ECX, imm32 and others)
         if insn.mnemonic == Mnemonic.MOV:
             if insn.op0_kind == OpKind.REGISTER and insn.op1_kind == OpKind.IMMEDIATE32:
                 if int(insn.immediate32) == target_va:
@@ -191,7 +189,6 @@ def _xref_imm32_x86(image: bytes, image_base: int, func_rva: int, func_len: int,
 
 
 def _find_func_start_x86(image: bytes, image_base: int, xref_rva: int, text_funcs: list[tuple[int, int]]) -> tuple[int, int] | None:
-    """Return (begin_rva, end_rva) of the function containing xref_rva."""
     for begin, end in text_funcs:
         if begin <= xref_rva < end:
             return (begin, end)
@@ -199,22 +196,12 @@ def _find_func_start_x86(image: bytes, image_base: int, xref_rva: int, text_func
 
 
 def _resolve_jmp_stub_x86(image: bytes, image_base: int, func_rva: int, text_funcs: list[tuple[int, int]], max_depth: int = 3) -> int:
-    """If func_rva is a small stub that ends with JMP rel32, follow the JMP to find
-    the real function start. Returns the resolved function RVA (may be the same as
-    func_rva if it's not a stub).
-
-    This handles the MSVC pattern where a small error-reporting stub jumps into the
-    middle of the real function body, and we need to find the function that contains
-    that target address.
-    """
     for _ in range(max_depth):
-        # Find the function boundaries
         func_info = _find_func_start_x86(image, image_base, func_rva, text_funcs)
         if func_info is None:
             break
         begin, end = func_info
         func_len = end - begin
-        # Only follow stubs (small functions, < 64 bytes)
         if func_len > 64:
             break
         start_va = image_base + begin
@@ -227,7 +214,6 @@ def _resolve_jmp_stub_x86(image: bytes, image_base: int, func_rva: int, text_fun
                 break
         if jmp_target is None:
             break
-        # Find the function that contains the JMP target
         target_func = _find_func_start_x86(image, image_base, jmp_target, text_funcs)
         if target_func is None:
             break
@@ -244,13 +230,8 @@ def _analyze_x86(
     log: list[str],
     log_path,
 ) -> NoSymbolResult:
-    """x86-specific nosymbol analysis."""
-
     arch = "x86"
     bitness = 32
-
-    # For x86, strings may be in .rdata or .text (some builds embed them inline).
-    # Search all read-only data sections.
 
     def _find_str(pat: bytes) -> int | None:
         for sec in pe.sections:
@@ -259,7 +240,6 @@ def _analyze_x86(
                 return rva
         return None
 
-    # ASCII strings
     q = _find_str(b"CDefPolicy::Query")
     local_only = _find_str(b"CSLQuery::IsTerminalTypeLocalOnly")
     single_enabled = _find_str(b"CSessionArbitrationHelper::IsSingleSessionPerUserEnabled")
@@ -278,7 +258,6 @@ def _analyze_x86(
     _log_append(log, f"string RVAs: GetInstanceOfTSLicense={inst_license and hex(inst_license)}")
     _log_append(log, f"string RVAs: IsSingleSessionPerUser={single_user and hex(single_user)}")
 
-    # Wide strings for SLInit scanning
     def _find_wide(s: str) -> int | None:
         return _find_str(s.encode("utf-16le"))
 
@@ -299,7 +278,6 @@ def _analyze_x86(
         _write_log(log_path, log)
         raise RuntimeError(f"Failed to locate required strings (x86 nosymbol): {', '.join(missing_strs)}")
 
-    # Import/IAT RVAs
     memset_iat = (
         find_iat_rva(pe, "msvcrt.dll", "memset")
         or find_iat_rva(pe, "ucrtbase.dll", "memset")
@@ -317,7 +295,6 @@ def _analyze_x86(
         verify_iat = find_iat_rva(pe, "api-ms-win-core-kernel32-legacy-l1-1-1.dll", "VerifyVersionInfoW")
     _log_append(log, f"IAT RVAs: VerifyVersionInfoW={(hex(verify_iat) if verify_iat is not None else None)}")
 
-    # Enumerate x86 functions by scanning for prologues in .text
     text_funcs = _scan_text_functions_x86(pe, mem.image, mem.image_base)
     _log_append(log, f"x86 text functions found: {len(text_funcs)}")
 
@@ -326,15 +303,10 @@ def _analyze_x86(
         _write_log(log_path, log)
         raise RuntimeError("No x86 functions found in .text section")
 
-    # Find functions by scanning for xrefs to key strings
     addrs: dict[str, int] = {}
     func_sizes: dict[str, int] = {}
     allow_remote_xref: int | None = None
 
-    # CDefPolicy_Query is special: the string "CDefPolicy::Query" may be embedded in
-    # .text and referenced only from an error stub, not from the real function body.
-    # Instead, find CDefPolicy::Query by scanning for the CMP [ecx+320h] or CMP [ecx+63Ch]
-    # pattern that is the actual patch site.
     targets_required = {
         "GetInstanceOfTSLicense": inst_license,
         "IsSingleSessionPerUserEnabled": single_enabled,
@@ -375,15 +347,7 @@ def _analyze_x86(
         _write_log(log_path, log)
         raise RuntimeError("Failed to locate CSLQuery::Initialize (x86)")
 
-    # Find CDefPolicy::Query by scanning for the CMP [ecx+320h] or CMP [ecx+63Ch] pattern.
-    # This is more reliable than string xref for x86 since the string may be in .text.
     def _find_def_policy_query_x86() -> int | None:
-        """Find CDefPolicy::Query by scanning for the characteristic CMP pattern.
-
-        CDefPolicy::Query uses ECX as the 'this' pointer (thiscall convention),
-        so we look for CMP reg, [ecx+320h] or CMP [ecx+63Ch], reg.
-        We also verify that def_policy_patch succeeds on the candidate.
-        """
         candidates: list[int] = []
         for begin_rva, end_rva in text_funcs:
             func_len = end_rva - begin_rva
@@ -395,7 +359,6 @@ def _analyze_x86(
             for insn in dec:
                 if insn.mnemonic != Mnemonic.CMP:
                     continue
-                # CMP reg, [ecx+320h]  (thiscall: ECX is 'this')
                 if (
                     insn.op1_kind == OpKind.MEMORY
                     and insn.memory_base == Register.ECX
@@ -404,7 +367,6 @@ def _analyze_x86(
                 ):
                     candidates.append(begin_rva)
                     break
-                # CMP [ecx+63Ch], reg
                 if (
                     insn.op0_kind == OpKind.MEMORY
                     and insn.memory_base == Register.ECX
@@ -414,12 +376,10 @@ def _analyze_x86(
                     candidates.append(begin_rva)
                     break
 
-        # Verify each candidate with def_policy_patch
         for rva in candidates:
             result = def_policy_patch(ctx, start_rva=rva)
             if result is not None:
                 return rva
-        # If none verified, return first candidate anyway
         return candidates[0] if candidates else None
 
     dp_query_rva = _find_def_policy_query_x86()
@@ -427,7 +387,6 @@ def _analyze_x86(
         addrs["CDefPolicy_Query"] = dp_query_rva
         _log_append(log, f"CDefPolicy_Query: found via CMP pattern at RVA 0x{dp_query_rva:X}")
     else:
-        # Fallback: use string xref (may be wrong but better than nothing)
         for begin_rva, end_rva in text_funcs:
             func_len = end_rva - begin_rva
             if func_len <= 0:
@@ -446,7 +405,6 @@ def _analyze_x86(
     lines: list[str] = []
     lines.append(f"[{ver.to_ini_section()}]")
 
-    # SingleUserPatch
     su_start = addrs.get("IsSingleSessionPerUserEnabled") or addrs.get("IsSingleSessionPerUser")
     su_func_start: int | None = su_start
     su = None
@@ -460,7 +418,6 @@ def _analyze_x86(
             direct_call=False,
         )
 
-    # Fallback: scan all functions for VerifyVersionInfoW call
     if su is None and verify_iat is not None:
         best: PatchResult | None = None
         best_func_start: int | None = None
@@ -505,9 +462,6 @@ def _analyze_x86(
         lines.append("ERROR: SingleUserPatch not found")
         _log_append(log, "SingleUserPatch: NOT found")
 
-    # DefPolicyPatch
-    # The xref scan may find a small error-reporting stub that jumps into the real
-    # CDefPolicy::Query body. Resolve any such stub before calling def_policy_patch.
     dp_func_rva = _resolve_jmp_stub_x86(mem.image, mem.image_base, addrs["CDefPolicy_Query"], text_funcs)
     _log_append(log, f"DefPolicyPatch: resolved func RVA 0x{dp_func_rva:X} (from xref RVA 0x{addrs['CDefPolicy_Query']:X})")
     dp = def_policy_patch(ctx, start_rva=dp_func_rva)
@@ -531,13 +485,11 @@ def _analyze_x86(
         lines.append("ERROR: DefPolicyPatch patten not found")
         _log_append(log, "DefPolicyPatch: NOT found")
 
-    # Version gating
     if ver.ms <= 0x00060001:
         _write_log(log_path, log)
         return NoSymbolResult(text="\n".join(lines) + "\n")
 
     if ver.ms == 0x00060002:
-        # Win8: SLPolicy hook is the first CALL after the allow-remote xref
         start_va = mem.image_base + allow_remote_xref
         data = mem.image[allow_remote_xref:allow_remote_xref + 0x400]
         dec = Decoder(bitness, data, ip=start_va)
@@ -553,7 +505,6 @@ def _analyze_x86(
         _write_log(log_path, log)
         return NoSymbolResult(text="\n".join(lines) + "\n")
 
-    # LocalOnlyPatch
     lo = local_only_patch(
         ctx,
         start_rva=addrs["GetInstanceOfTSLicense"],
@@ -579,7 +530,6 @@ def _analyze_x86(
         lines.append("ERROR: LocalOnlyPatch patten not found")
         _log_append(log, "LocalOnlyPatch: NOT found")
 
-    # SLInit hook
     csl_init_rva = addrs["CSLQuery_Initialize"]
     csl_init_len = func_sizes.get("CSLQuery_Initialize", 0x11000)
     _log_append(log, f"SLInitHook: CSLQuery::Initialize RVA 0x{csl_init_rva:X}")
@@ -599,7 +549,6 @@ def _analyze_x86(
     lines.append("")
     lines.append(f"[{ver.to_ini_section()}-SLInit]")
 
-    # Map policy wide strings -> var keys (same as x64)
     keys = {
         "TerminalServices-RemoteConnectionManager-AllowRemoteConnections": "bRemoteConnAllowed",
         "TerminalServices-RemoteConnectionManager-AllowMultipleSessions": "bFUSEnabled",
@@ -614,10 +563,6 @@ def _analyze_x86(
         if rva is not None:
             str_rvas[s] = rva
 
-    # Scan CSLQuery::Initialize to recover global var RVAs.
-    # In x86, globals are accessed via absolute addresses:
-    #   MOV [abs_addr], EAX   -> memory_base == NONE, memory_segment == DS
-    #   MOV ECX, imm32        -> selects which policy string is being queried
     var_rvas: dict[str, int] = {"bServerSku": 0, "bInitialized": 0}
     for v in keys.values():
         var_rvas[v] = 0
@@ -629,8 +574,6 @@ def _analyze_x86(
     dec = Decoder(bitness, code, ip=start_va)
 
     for insn in dec:
-        # x86: MOV [abs_addr], EAX  (no base register, DS segment)
-        # iced-x86: memory_base == NONE (0), memory_index == NONE, memory_segment == DS
         if (
             var_rvas.get(current, 0) == 0
             and insn.mnemonic == Mnemonic.MOV
@@ -647,7 +590,6 @@ def _analyze_x86(
                 _log_append(log, f"SLInitScan: {current} RVA 0x{rva:X} via {_fmt_insn(ctx, insn)}")
             continue
 
-        # x86: MOV ECX, imm32  -> selects which policy string is being queried
         if (
             insn.mnemonic == Mnemonic.MOV
             and insn.op0_kind == OpKind.REGISTER
@@ -664,7 +606,6 @@ def _analyze_x86(
                     break
             continue
 
-        # x86: MOV [abs_addr], 1  -> bInitialized
         if (
             insn.mnemonic == Mnemonic.MOV
             and insn.op0_kind == OpKind.MEMORY
@@ -715,18 +656,14 @@ def analyze(
     sec_name = rdata_sec.Name.rstrip(b"\x00").decode(errors="ignore")
     _log_append(log, f"scan section: {sec_name} @ RVA 0x{int(rdata_sec.VirtualAddress):X}")
 
-    # ASCII strings
     q = _pattern_match_in_section(mem.image, rdata_sec, b"CDefPolicy::Query")
     local_only = _pattern_match_in_section(mem.image, rdata_sec, b"CSLQuery::IsTerminalTypeLocalOnly")
-    # Some builds only include the shortened suffix string in .rdata.
     single_enabled = _pattern_match_in_section(mem.image, rdata_sec, b"CSessionArbitrationHelper::IsSingleSessionPerUserEnabled")
     if single_enabled is None:
         single_enabled = _pattern_match_in_section(mem.image, rdata_sec, b"CSessionArbitrationHelper::IsSingleSessionPerUserEnabled".split(b"::")[-1])
-    # Some builds include a trailing space in the string table.
     inst_license = _pattern_match_in_section(mem.image, rdata_sec, b"CEnforcementCore::GetInstanceOfTSLicense ")
     if inst_license is None:
         inst_license = _pattern_match_in_section(mem.image, rdata_sec, b"CEnforcementCore::GetInstanceOfTSLicense")
-    # Prefer full name if present
     single_user = _pattern_match_in_section(mem.image, rdata_sec, b"CUtils::IsSingleSessionPerUser")
     if single_user is None:
         single_user = _pattern_match_in_section(mem.image, rdata_sec, b"IsSingleSessionPerUser")
@@ -737,7 +674,6 @@ def analyze(
     _log_append(log, f"rdata string RVAs: GetInstanceOfTSLicense={inst_license and hex(inst_license)}")
     _log_append(log, f"rdata string RVAs: IsSingleSessionPerUser={single_user and hex(single_user)}")
 
-    # Wide strings used by SLInit scanning
     allow_remote = _pattern_match_in_section(
         mem.image, rdata_sec, "TerminalServices-RemoteConnectionManager-AllowRemoteConnections".encode("utf-16le")
     )
@@ -747,7 +683,6 @@ def analyze(
         _write_log(log_path, log)
         raise RuntimeError("Failed to locate required .rdata strings (nosymbol mode)")
 
-    # Import/IAT RVAs
     memset_iat = (
         find_iat_rva(pe, "msvcrt.dll", "memset")
         or find_iat_rva(pe, "ucrtbase.dll", "memset")
@@ -765,7 +700,6 @@ def analyze(
         verify_iat = find_iat_rva(pe, "kernel32.dll", "VerifyVersionInfoW")
     _log_append(log, f"IAT RVAs: VerifyVersionInfoW={(hex(verify_iat) if verify_iat is not None else None)}")
 
-    # Discover function RVAs by scanning exception directory for LEA xrefs.
     runtime_funcs = parse_exception_directory_x64(pe, mem.image)
     if not runtime_funcs:
         _log_append(log, "ERROR: no exception directory")
@@ -777,9 +711,6 @@ def analyze(
     csl_init_len: int | None = None
     allow_remote_xref: int | None = None
 
-    # We prefer finding the CUtils::IsSingleSessionPerUser implementation, but some
-    # builds don't reference the short string in a way we can recover via exception
-    # directory scanning. Treat it as optional and fall back to the helper string.
     targets_required = {
         "CDefPolicy_Query": q,
         "GetInstanceOfTSLicense": inst_license,
@@ -825,18 +756,10 @@ def analyze(
     lines: list[str] = []
     lines.append(f"[{ver.to_ini_section()}]")
 
-    # Patches
-    # Prefer the IsSingleSessionPerUserEnabled implementation. The CUtils version
-    # tends to have CMP instructions that check version info fields, leading to
-    # false positives.
-    # However, IsSingleSessionPerUserEnabled may not contain VerifyVersionInfoW call
-    # in some builds. In that case, prefer IsSingleSessionPerUser which always has
-    # the VerifyVersionInfoW call.
     su_start: int | None = None
     su_func_start: int | None = None
     su: PatchResult | None = None
 
-    # Try IsSingleSessionPerUserEnabled first
     if addrs.get("IsSingleSessionPerUserEnabled") is not None:
         _log_append(log, f"SingleUser scan start RVA (IsSingleSessionPerUserEnabled): 0x{int(addrs['IsSingleSessionPerUserEnabled']):X}")
         su = single_user_patch(
@@ -850,7 +773,6 @@ def analyze(
             su_start = int(addrs["IsSingleSessionPerUserEnabled"])
             su_func_start = su_start
 
-    # If IsSingleSessionPerUserEnabled didn't work, try IsSingleSessionPerUser
     if su is None and addrs.get("IsSingleSessionPerUser") is not None:
         _log_append(log, f"SingleUser scan start RVA (IsSingleSessionPerUser): 0x{int(addrs['IsSingleSessionPerUser']):X}")
         su = single_user_patch(
@@ -864,10 +786,6 @@ def analyze(
             su_start = int(addrs["IsSingleSessionPerUser"])
             su_func_start = su_start
 
-    # If we found a string-xref-based function start but couldn't locate the
-    # patch site, do a best-effort scan for the VerifyVersionInfoW call.
-    # This keeps --nosymbol usable on builds where the string reference isn't
-    # within the same function (or our backtrace lands in a wrapper).
     if su is None and verify_iat is not None:
         best: PatchResult | None = None
         best_func_start: int | None = None
@@ -881,8 +799,6 @@ def analyze(
             )
             if res is None:
                 continue
-            # Heuristic: prefer the VerifyVersionInfoW call-site patch form
-            # when available (mov_eax_1_nop_N) over the generic CMP nop.
             code_line = next((line for line in res.lines if line.startswith(f"SingleUserCode.{arch}=")), "")
             if "mov_eax_1_nop_" in code_line:
                 best = res
@@ -944,13 +860,11 @@ def analyze(
         lines.append("ERROR: DefPolicyPatch patten not found")
         _log_append(log, "DefPolicyPatch: NOT found")
 
-    # Version gating like the C++ tool
     if ver.ms <= 0x00060001:
         _write_log(log_path, log)
         return NoSymbolResult(text="\n".join(lines) + "\n")
 
     if ver.ms == 0x00060002:
-        # Win8 SLPolicy hook is a simple call after the allow-remote xref.
         start_va = mem.image_base + allow_remote_xref
         data = mem.image[allow_remote_xref:allow_remote_xref + 0x400]
         dec = Decoder(bitness, data, ip=start_va)
@@ -993,7 +907,6 @@ def analyze(
         lines.append("ERROR: LocalOnlyPatch patten not found")
         _log_append(log, "LocalOnlyPatch: NOT found")
 
-    # SLInit hook
     csl_init_rva = addrs["CSLQuery_Initialize"]
     _log_append(log, f"SLInitHook: CSLQuery::Initialize RVA 0x{int(csl_init_rva):X}")
     _log_disasm_context(
@@ -1013,7 +926,6 @@ def analyze(
     lines.append("")
     lines.append(f"[{ver.to_ini_section()}-SLInit]")
 
-    # Map policy strings -> var keys
     keys = {
         "TerminalServices-RemoteConnectionManager-AllowRemoteConnections": "bRemoteConnAllowed",
         "TerminalServices-RemoteConnectionManager-AllowMultipleSessions": "bFUSEnabled",
@@ -1028,7 +940,6 @@ def analyze(
         if rva is not None:
             str_rvas[s] = int(rva)
 
-    # Scan CSLQuery::Initialize to recover global var RVAs.
     var_rvas: dict[str, int] = {"bServerSku": 0, "bInitialized": 0}
     for v in keys.values():
         var_rvas[v] = 0
@@ -1040,7 +951,6 @@ def analyze(
     code = mem.image[csl_init_rva:csl_init_rva + scan_len]
     dec = Decoder(bitness, code, ip=start_va)
     for insn in dec:
-        # MOV [RIP+disp], EAX -> store to current var
         if (
             var_rvas.get(current, 0) == 0
             and insn.mnemonic == Mnemonic.MOV
@@ -1057,7 +967,6 @@ def analyze(
                 )
             continue
 
-        # LEA RCX, [RIP+disp] selects which policy is being queried.
         if (
             insn.mnemonic == Mnemonic.LEA
             and insn.op0_kind == OpKind.REGISTER
@@ -1079,7 +988,6 @@ def analyze(
                     break
             continue
 
-        # MOV [RIP+disp], 1 marks bInitialized.
         if (
             insn.mnemonic == Mnemonic.MOV
             and insn.op0_kind == OpKind.MEMORY

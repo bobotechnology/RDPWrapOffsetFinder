@@ -2,41 +2,15 @@
 
 A tool to find offsets in `termsrv.dll` for use with [RDPWrap](https://github.com/stascorp/rdpwrap) and generate corresponding `rdpwrap.ini` sections.
 
-## ✨ Features
+## Features
 
 - Extracts RDPWrap offsets from `termsrv.dll` for enabling multiple RDP connections
 - Supports both symbol-based and heuristic analysis methods
 - Generates properly formatted INI sections compatible with RDPWrap
 - Handles both x86 and x64 architectures
-- Works with various Windows versions
-- Command-line interface for easy automation
-- Fixed lowercase register naming in generated configurations
+- Can be built as a standalone executable via PyInstaller
 
-## 🛠️ Installation
-
-### Prerequisites
-
-- Python 3.9 or higher
-- Windows OS (since this analyzes Windows system files)
-- Administrator privileges (recommended for accessing system files)
-
-### From Source
-
-```bash
-git clone https://github.com/bobotechnology/RDPWrapOffsetFinder.git
-cd rdpwrap-offset-finder
-pip install -e .
-```
-
-### Direct Install
-
-```bash
-pip install git+https://github.com/bobotechnology/RDPWrapOffsetFinder.git
-```
-
-## 📖 Usage
-
-### Basic Usage
+## Usage
 
 ```bash
 # Analyze default system termsrv.dll with symbol-based approach
@@ -46,9 +20,6 @@ rdpwrap-offset-finder
 rdpwrap-offset-finder C:\Path\To\termsrv.dll
 
 # Use heuristic pattern search instead of PDB symbols
-rdpwrap-offset-finder --nosymbol
-
-# Analyze specific file with heuristic approach
 rdpwrap-offset-finder C:\Path\To\termsrv.dll --nosymbol
 ```
 
@@ -58,7 +29,17 @@ rdpwrap-offset-finder C:\Path\To\termsrv.dll --nosymbol
 - `--nosymbol`: Use heuristic pattern search instead of PDB symbols
 - `--help`: Show help message and exit
 
-## 🔍 How It Works
+## Build standalone executable
+
+```bash
+python build_exe.py
+```
+
+Output goes to `dist/rdpwrap-offset-finder.exe`.
+
+Requires Python 3.9+ and PyInstaller.
+
+## How It Works
 
 The tool works in two modes:
 
@@ -67,7 +48,7 @@ The tool works in two modes:
 
 Both approaches extract the same information but may be more or less reliable depending on the availability of symbols and the specific version of `termsrv.dll`.
 
-## 📤 Output Format
+## Output Format
 
 The tool outputs INI sections that can be added to `rdpwrap.ini`:
 
@@ -91,7 +72,9 @@ SingleUserCode.Arch=CODE_TYPE
 DefPolicyPatch.Arch=FLAG_VALUE
 ; Offset for default policy patch
 DefPolicyOffset.Arch=HEX_OFFSET_VALUE
-; Code type for default policy patch (e.g., CDefPolicy_Query_eax_rcx_jmp)
+; Code type for default policy patch
+;   e.g. CDefPolicy_Query_eax_rcx       (register-based CMP)
+;        CDefPolicy_Query_638h_mem_rdi  (memory-based MOV+JMP)
 DefPolicyCode.Arch=POLICY_CODE_TYPE
 
 ; Enable SLInit hook
@@ -120,14 +103,10 @@ ulMaxDebugSessions.Arch=HEX_OFFSET_VALUE
 bFUSEnabled.Arch       =HEX_OFFSET_VALUE
 ```
 
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
-
-## 📄 License
+## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## ⚠️ Disclaimer
+## Disclaimer
 
 This tool is intended for educational purposes and authorized testing only. Please ensure you comply with applicable laws and regulations when using this tool. Misuse of this tool may violate terms of service or local laws.

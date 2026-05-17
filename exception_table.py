@@ -28,8 +28,6 @@ def _u32(b: bytes, off: int) -> int:
 
 
 def parse_exception_directory_x64(pe: pefile.PE, image: bytes) -> list[RuntimeFunction]:
-    """Parse IMAGE_DIRECTORY_ENTRY_EXCEPTION into runtime function entries (x64)."""
-
     dd = pe.OPTIONAL_HEADER.DATA_DIRECTORY[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_EXCEPTION"]]
     rva = int(dd.VirtualAddress)
     size = int(dd.Size)
@@ -64,15 +62,11 @@ def _parse_unwind_info(image: bytes, rva: int) -> UnwindInfo:
 
 
 def backtrace_x64(image: bytes, func: RuntimeFunction) -> RuntimeFunction:
-    """Follow chained unwind info to the outermost RuntimeFunction."""
-
-    # Indirect unwind data points to another RUNTIME_FUNCTION.
     if func.unwind_rva & RUNTIME_FUNCTION_INDIRECT:
         func = _read_runtime_function(image, func.unwind_rva & ~0x3)
 
     unwind = _parse_unwind_info(image, func.unwind_rva)
     while unwind.flags & UNW_FLAG_CHAININFO:
-        # UNWIND_CODE array starts at +4. It's an array of 2-byte slots.
         code_slots = (unwind.count_of_codes + 1) & ~1
         chained_off = func.unwind_rva + 4 + (2 * code_slots)
         func = _read_runtime_function(image, chained_off)
