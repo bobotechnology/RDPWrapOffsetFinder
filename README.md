@@ -74,7 +74,7 @@ DefPolicyPatch.Arch=FLAG_VALUE
 DefPolicyOffset.Arch=HEX_OFFSET_VALUE
 ; Code type for default policy patch
 ;   e.g. CDefPolicy_Query_eax_rcx       (register-based CMP)
-;        CDefPolicy_Query_638h_mem_rdi  (memory-based MOV+JMP)
+;        CDefPolicy_Query_r9d_rdi_jmp   (register-based MOV+CMP+JNE)
 DefPolicyCode.Arch=POLICY_CODE_TYPE
 
 ; Enable SLInit hook

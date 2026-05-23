@@ -159,14 +159,14 @@ def def_policy_patch(ctx: DisasmContext, start_rva: int) -> PatchResult | None:
                                 return None
                             suffix = "_jmp" if nxt.mnemonic == Mnemonic.JNE else ""
 
-                            disp = insn.memory_displacement
+                            reg1 = reg_name(mov_target2)
                             reg2 = reg_name(alias_base)
                             off_rva = int(insn.ip - ctx.image_base)
                             return PatchResult(
                                 lines=[
                                     "DefPolicyPatch.x64=1",
                                     f"DefPolicyOffset.x64={off_rva:X}",
-                                    f"DefPolicyCode.x64=CDefPolicy_Query_{disp:X}h_mem_{reg2.lower()}{suffix}",
+                                    f"DefPolicyCode.x64=CDefPolicy_Query_{reg1.lower()}_{reg2.lower()}{suffix}",
                                 ]
                             )
 
