@@ -45,6 +45,7 @@ dev = [
 
 [project.scripts]
 rdpwrap-offset-finder = "cli:main"
+rdpwrap-offset-finder-gui = "gui:main"
 
 [project.urls]
 Homepage = "https://github.com/bobotechnology/RDPWrapOffsetFinder"

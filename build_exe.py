@@ -34,8 +34,8 @@ def clean_old_build() -> None:
                 p.unlink()
 
 
-def build_exe() -> None:
-    print(f"Building exe from main.py...")
+def build_console_exe() -> None:
+    print("Building console exe from main.py...")
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
@@ -49,11 +49,51 @@ def build_exe() -> None:
         "--noconfirm",
         "--hidden-import", "symbols",
         "--hidden-import", "nosymbol",
+        "--hidden-import", "nosymbol_arch",
+        "--hidden-import", "ms_pdb",
+        "--hidden-import", "patches",
+        "--hidden-import", "pe_image",
+        "--hidden-import", "imports",
+        "--hidden-import", "exception_table",
+        "--hidden-import", "disasm",
+        "--hidden-import", "winver",
+        "--hidden-import", "dbghelp",
         str(ROOT / "main.py"),
     ]
 
     subprocess.check_call(cmd, cwd=ROOT)
-    print(f"\nDone! Exe at: {DIST / 'rdpwrap-offset-finder.exe'}")
+    print(f"\nDone! Console exe at: {DIST / 'rdpwrap-offset-finder.exe'}")
+
+
+def build_gui_exe() -> None:
+    print("Building GUI exe from gui.py...")
+
+    cmd = [
+        sys.executable, "-m", "PyInstaller",
+        "--onefile",
+        "--windowed",
+        "--name", "rdpwrap-offset-finder-gui",
+        "--distpath", str(DIST),
+        "--workpath", str(ROOT / "build-gui"),
+        "--specpath", str(ROOT),
+        "--clean",
+        "--noconfirm",
+        "--hidden-import", "symbols",
+        "--hidden-import", "nosymbol",
+        "--hidden-import", "nosymbol_arch",
+        "--hidden-import", "ms_pdb",
+        "--hidden-import", "patches",
+        "--hidden-import", "pe_image",
+        "--hidden-import", "imports",
+        "--hidden-import", "exception_table",
+        "--hidden-import", "disasm",
+        "--hidden-import", "winver",
+        "--hidden-import", "dbghelp",
+        str(ROOT / "gui.py"),
+    ]
+
+    subprocess.check_call(cmd, cwd=ROOT)
+    print(f"\nDone! GUI exe at: {DIST / 'rdpwrap-offset-finder-gui.exe'}")
 
 
 def main() -> None:
@@ -63,7 +103,9 @@ def main() -> None:
     print("Cleaning old build artifacts...")
     clean_old_build()
 
-    build_exe()
+    build_console_exe()
+    build_gui_exe()
+    print(f"\nBoth executables are in: {DIST}")
 
 
 if __name__ == "__main__":

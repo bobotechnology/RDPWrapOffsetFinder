@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,6 +33,7 @@ def _load_pe_file(path: Path) -> TermsrvContext:
 def analyze_termsrv(
     path: str | os.PathLike[str] | None,
     use_symbols: bool = True,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> str:
     dll_path = Path(path) if path else _get_default_termsrv_path()
     if not dll_path.exists():
@@ -43,12 +45,16 @@ def analyze_termsrv(
 
     if use_symbols:
         from symbols import analyze as analyze_symbols
-        raw = analyze_symbols(ctx.pe, dll_path, ver).text
+        raw = analyze_symbols(ctx.pe, dll_path, ver, progress_callback=progress_callback).text
     else:
         from nosymbol import analyze as analyze_nosymbol
         log_name = f"{ver.to_ini_section()}_{arch}.log"
         log_path = Path.cwd() / "log" / log_name
-        raw = analyze_nosymbol(ctx.pe, dll_path, ver, log_path=log_path).text
+        raw = analyze_nosymbol(
+            ctx.pe, dll_path, ver,
+            log_path=log_path,
+            progress_callback=progress_callback,
+        ).text
 
     return _normalize_ini_output(raw, arch=arch)
 

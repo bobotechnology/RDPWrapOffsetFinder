@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
@@ -13,6 +14,11 @@ from imports import find_iat_rva
 from patches import PatchResult, def_policy_patch, local_only_patch, single_user_patch
 from pe_image import load_memory_image
 from winver import FileVersion
+
+# PE section characteristics flags (IMAGE_SECTION_HEADER.Characteristics).
+# See: winnt.h / ECMA-335 II.25.3.3.1 / PE-COFF specification §6.3.
+# Used as fallback when no section is explicitly named ".text"/".rdata".
+IMAGE_SCN_MEM_EXECUTE = 0x20000000  # Section can be executed as code.
 
 
 def _find_section(pe: pefile.PE, name: bytes) -> pefile.SectionStructure | None:
@@ -80,9 +86,21 @@ class NoSymbolResult:
     text: str
 
 
+# Module-level progress callback set by analyze() — allows the GUI to
+# receive real-time log messages without threading through every internal
+# function signature.  Safe because only one analysis runs at a time.
+_progress_callback: Callable[[str], None] | None = None
+
+
 def _log_append(log: list[str], msg: str) -> None:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log.append(f"[{ts}] {msg}")
+    formatted = f"[{ts}] {msg}"
+    log.append(formatted)
+    if _progress_callback is not None:
+        try:
+            _progress_callback(formatted)
+        except Exception:
+            pass
 
 
 def _write_log(path: str | Path | None, lines: list[str]) -> None:
@@ -138,8 +156,10 @@ def _log_disasm_context(
 def _scan_text_functions_x86(pe: pefile.PE, image: bytes, image_base: int) -> list[tuple[int, int]]:
     text_sec = _find_section(pe, b".text")
     if text_sec is None:
+        # Fallback: pick the first section flagged executable (handles DLLs
+        # where the code section is named differently, e.g. packed binaries).
         for sec in pe.sections:
-            if sec.Characteristics & 0x20000000:
+            if sec.Characteristics & IMAGE_SCN_MEM_EXECUTE:
                 text_sec = sec
                 break
     if text_sec is None:
@@ -221,63 +241,41 @@ def _resolve_jmp_stub_x86(image: bytes, image_base: int, func_rva: int, text_fun
     return func_rva
 
 
-def _analyze_x86(
-    pe: pefile.PE,
-    dll_path: Path,
-    ver: FileVersion,
-    mem,
-    ctx: DisasmContext,
-    log: list[str],
-    log_path,
-) -> NoSymbolResult:
-    arch = "x86"
-    bitness = 32
+def _locate_strings(pe: pefile.PE, image: bytes) -> dict[str, int | None]:
+    """Locate the C++ class/method name strings in the PE's read-only sections.
 
-    def _find_str(pat: bytes) -> int | None:
+    Scans .rdata first (the common case), then falls back to all sections for
+    DLLs where strings live elsewhere. Returns a dict mapping logical name to
+    RVA (or None if not found).
+    """
+    rdata = _find_section(pe, b".rdata")
+
+    def _find(pat: bytes) -> int | None:
+        if rdata is not None:
+            rva = _pattern_match_in_section(image, rdata, pat)
+            if rva is not None:
+                return rva
         for sec in pe.sections:
-            rva = _pattern_match_in_section(mem.image, sec, pat)
+            rva = _pattern_match_in_section(image, sec, pat)
             if rva is not None:
                 return rva
         return None
 
-    q = _find_str(b"CDefPolicy::Query")
-    local_only = _find_str(b"CSLQuery::IsTerminalTypeLocalOnly")
-    single_enabled = _find_str(b"CSessionArbitrationHelper::IsSingleSessionPerUserEnabled")
-    if single_enabled is None:
-        single_enabled = _find_str(b"IsSingleSessionPerUserEnabled")
-    inst_license = _find_str(b"CEnforcementCore::GetInstanceOfTSLicense ")
-    if inst_license is None:
-        inst_license = _find_str(b"CEnforcementCore::GetInstanceOfTSLicense")
-    single_user = _find_str(b"CUtils::IsSingleSessionPerUser")
-    if single_user is None:
-        single_user = _find_str(b"IsSingleSessionPerUser")
+    return {
+        "CDefPolicy::Query": _find(b"CDefPolicy::Query"),
+        "CSLQuery::IsTerminalTypeLocalOnly": _find(b"CSLQuery::IsTerminalTypeLocalOnly"),
+        "IsSingleSessionPerUserEnabled": _find(b"CSessionArbitrationHelper::IsSingleSessionPerUserEnabled")
+            or _find(b"IsSingleSessionPerUserEnabled"),
+        "GetInstanceOfTSLicense": _find(b"CEnforcementCore::GetInstanceOfTSLicense ")
+            or _find(b"CEnforcementCore::GetInstanceOfTSLicense"),
+        "IsSingleSessionPerUser": _find(b"CUtils::IsSingleSessionPerUser")
+            or _find(b"IsSingleSessionPerUser"),
+        "AllowRemoteConnections": _find("TerminalServices-RemoteConnectionManager-AllowRemoteConnections".encode("utf-16le")),
+    }
 
-    _log_append(log, f"string RVAs: CDefPolicy::Query={q and hex(q)}")
-    _log_append(log, f"string RVAs: CSLQuery::IsTerminalTypeLocalOnly={local_only and hex(local_only)}")
-    _log_append(log, f"string RVAs: IsSingleSessionPerUserEnabled={single_enabled and hex(single_enabled)}")
-    _log_append(log, f"string RVAs: GetInstanceOfTSLicense={inst_license and hex(inst_license)}")
-    _log_append(log, f"string RVAs: IsSingleSessionPerUser={single_user and hex(single_user)}")
 
-    def _find_wide(s: str) -> int | None:
-        return _find_str(s.encode("utf-16le"))
-
-    allow_remote_str = _find_wide("TerminalServices-RemoteConnectionManager-AllowRemoteConnections")
-
-    _log_append(log, f"string RVAs: AllowRemoteConnections={allow_remote_str and hex(allow_remote_str)}")
-
-    if None in (q, local_only, single_enabled, inst_license, single_user, allow_remote_str):
-        missing_strs = [n for n, v in [
-            ("CDefPolicy::Query", q),
-            ("IsTerminalTypeLocalOnly", local_only),
-            ("IsSingleSessionPerUserEnabled", single_enabled),
-            ("GetInstanceOfTSLicense", inst_license),
-            ("IsSingleSessionPerUser", single_user),
-            ("AllowRemoteConnections", allow_remote_str),
-        ] if v is None]
-        _log_append(log, f"ERROR: required strings missing: {', '.join(missing_strs)}")
-        _write_log(log_path, log)
-        raise RuntimeError(f"Failed to locate required strings (x86 nosymbol): {', '.join(missing_strs)}")
-
+def _locate_iats(pe: pefile.PE, log: list[str]) -> tuple[int, int | None]:
+    """Find memset and VerifyVersionInfoW IAT slot RVAs."""
     memset_iat = (
         find_iat_rva(pe, "msvcrt.dll", "memset")
         or find_iat_rva(pe, "ucrtbase.dll", "memset")
@@ -285,352 +283,102 @@ def _analyze_x86(
     )
     if memset_iat is None:
         _log_append(log, "ERROR: memset import not found")
-        _write_log(log_path, log)
-        raise RuntimeError("memset import not found (x86)")
-
+        raise RuntimeError("memset import not found")
     _log_append(log, f"IAT RVAs: memset=0x{memset_iat:X}")
 
-    verify_iat = find_iat_rva(pe, "kernel32.dll", "VerifyVersionInfoW")
+    verify_iat = find_iat_rva(pe, "api-ms-win-core-kernel32-legacy-l1-1-1.dll", "VerifyVersionInfoW")
     if verify_iat is None:
-        verify_iat = find_iat_rva(pe, "api-ms-win-core-kernel32-legacy-l1-1-1.dll", "VerifyVersionInfoW")
+        verify_iat = find_iat_rva(pe, "kernel32.dll", "VerifyVersionInfoW")
     _log_append(log, f"IAT RVAs: VerifyVersionInfoW={(hex(verify_iat) if verify_iat is not None else None)}")
+    return memset_iat, verify_iat
 
-    text_funcs = _scan_text_functions_x86(pe, mem.image, mem.image_base)
-    _log_append(log, f"x86 text functions found: {len(text_funcs)}")
 
-    if not text_funcs:
-        _log_append(log, "ERROR: no x86 functions found in .text")
-        _write_log(log_path, log)
-        raise RuntimeError("No x86 functions found in .text section")
+def _apply_single_user_patch(
+    strat, ctx, log, addrs, pe, mem, memset_iat, verify_iat,
+) -> tuple[PatchResult | None, int | None]:
+    """Try SingleUserPatch via targeted function, then fallback exhaustive scan.
 
-    addrs: dict[str, int] = {}
-    func_sizes: dict[str, int] = {}
-    allow_remote_xref: int | None = None
+    Returns (result, func_start_rva).
+    """
+    arch = strat.arch
+    su: PatchResult | None = None
+    su_func_start: int | None = None
 
-    targets_required = {
-        "GetInstanceOfTSLicense": inst_license,
-        "IsSingleSessionPerUserEnabled": single_enabled,
-        "IsLicenseTypeLocalOnly": local_only,
-        "CSLQuery_Initialize": allow_remote_str,
-    }
-    targets_optional = {
-        "IsSingleSessionPerUser": single_user,
-    }
-    targets = dict(targets_required)
-    targets.update(targets_optional)
-
-    for begin_rva, end_rva in text_funcs:
-        func_len = end_rva - begin_rva
-        if func_len <= 0:
-            continue
-        for key, target_rva in list(targets.items()):
-            if key in addrs:
-                continue
-            xref = _xref_imm32_x86(mem.image, mem.image_base, begin_rva, func_len, target_rva)
-            if xref is None:
-                continue
-            addrs[key] = begin_rva
-            func_sizes[key] = func_len
-            _log_append(log, f"xref found: {key} -> function RVA 0x{begin_rva:X} (size 0x{func_len:X})")
-            if key == "CSLQuery_Initialize":
-                allow_remote_xref = xref
-        if len(addrs) == len(targets):
-            break
-
-    missing = [k for k in targets_required if k not in addrs]
-    if missing:
-        _log_append(log, f"ERROR: missing function xrefs: {', '.join(missing)}")
-        _write_log(log_path, log)
-        raise RuntimeError(f"Failed to find x86 function xrefs: {', '.join(missing)}")
-    if allow_remote_xref is None:
-        _log_append(log, "ERROR: CSLQuery::Initialize not located")
-        _write_log(log_path, log)
-        raise RuntimeError("Failed to locate CSLQuery::Initialize (x86)")
-
-    def _find_def_policy_query_x86() -> int | None:
-        candidates: list[int] = []
-        for begin_rva, end_rva in text_funcs:
-            func_len = end_rva - begin_rva
-            if func_len <= 0 or func_len > 0x800:
-                continue
-            start_va = mem.image_base + begin_rva
-            code = mem.image[begin_rva:begin_rva + func_len]
-            dec = Decoder(32, code, ip=start_va)
-            for insn in dec:
-                if insn.mnemonic != Mnemonic.CMP:
-                    continue
-                if (
-                    insn.op1_kind == OpKind.MEMORY
-                    and insn.memory_base == Register.ECX
-                    and insn.memory_displacement in (0x320, 0x63C)
-                    and insn.op0_kind == OpKind.REGISTER
-                ):
-                    candidates.append(begin_rva)
-                    break
-                if (
-                    insn.op0_kind == OpKind.MEMORY
-                    and insn.memory_base == Register.ECX
-                    and insn.memory_displacement in (0x320, 0x63C)
-                    and insn.op1_kind == OpKind.REGISTER
-                ):
-                    candidates.append(begin_rva)
-                    break
-
-        for rva in candidates:
-            result = def_policy_patch(ctx, start_rva=rva)
-            if result is not None:
-                return rva
-        return candidates[0] if candidates else None
-
-    dp_query_rva = _find_def_policy_query_x86()
-    if dp_query_rva is not None:
-        addrs["CDefPolicy_Query"] = dp_query_rva
-        _log_append(log, f"CDefPolicy_Query: found via CMP pattern at RVA 0x{dp_query_rva:X}")
-    else:
-        for begin_rva, end_rva in text_funcs:
-            func_len = end_rva - begin_rva
-            if func_len <= 0:
-                continue
-            xref = _xref_imm32_x86(mem.image, mem.image_base, begin_rva, func_len, q)
-            if xref is not None:
-                resolved = _resolve_jmp_stub_x86(mem.image, mem.image_base, begin_rva, text_funcs)
-                addrs["CDefPolicy_Query"] = resolved
-                _log_append(log, f"CDefPolicy_Query: found via string xref fallback at RVA 0x{resolved:X}")
-                break
-        if "CDefPolicy_Query" not in addrs:
-            _log_append(log, "ERROR: CDefPolicy_Query not found")
-            _write_log(log_path, log)
-            raise RuntimeError("Failed to find CDefPolicy_Query (x86)")
-
-    lines: list[str] = []
-    lines.append(f"[{ver.to_ini_section()}]")
-
-    su_start = addrs.get("IsSingleSessionPerUserEnabled") or addrs.get("IsSingleSessionPerUser")
-    su_func_start: int | None = su_start
-    su = None
-    if su_start is not None:
-        _log_append(log, f"SingleUser scan start RVA: 0x{su_start:X}")
+    # Attempt 1: IsSingleSessionPerUserEnabled
+    start = addrs.get("IsSingleSessionPerUserEnabled") or addrs.get("IsSingleSessionPerUser")
+    if start is not None:
+        _log_append(log, f"SingleUser scan start RVA: 0x{int(start):X}")
         su = single_user_patch(
-            ctx,
-            start_rva=su_start,
+            ctx, start_rva=int(start),
             memset_target_rva=memset_iat,
             verifyversion_iat_rva=verify_iat,
             direct_call=False,
         )
+        if su is not None:
+            su_func_start = int(start)
 
+    # Attempt 2: IsSingleSessionPerUser
+    if su is None and addrs.get("IsSingleSessionPerUser") is not None:
+        _log_append(log, f"SingleUser scan start RVA (IsSingleSessionPerUser): 0x{int(addrs['IsSingleSessionPerUser']):X}")
+        su = single_user_patch(
+            ctx, start_rva=int(addrs["IsSingleSessionPerUser"]),
+            memset_target_rva=memset_iat,
+            verifyversion_iat_rva=verify_iat,
+            direct_call=False,
+        )
+        if su is not None:
+            su_func_start = int(addrs["IsSingleSessionPerUser"])
+
+    # Attempt 3: exhaustive scan (architecture-specific preferred pattern)
     if su is None and verify_iat is not None:
-        best: PatchResult | None = None
-        best_func_start: int | None = None
-        for begin_rva, end_rva in text_funcs:
-            res = single_user_patch(
-                ctx,
-                start_rva=begin_rva,
-                memset_target_rva=memset_iat,
-                verifyversion_iat_rva=verify_iat,
-                direct_call=False,
-            )
-            if res is None:
-                continue
-            code_line = next((line for line in res.lines if line.startswith(f"SingleUserCode.{arch}=")), "")
-            if "pop_eax_add_esp_12_nop_" in code_line:
-                best = res
-                best_func_start = begin_rva
-                break
-            if best is None:
-                best = res
-                best_func_start = begin_rva
-        su = best
-        if best_func_start is not None:
-            su_func_start = best_func_start
+        su, su_func_start = strat.find_single_user_fallback(
+            ctx, pe, mem.image, memset_iat, verify_iat, arch,
+        )
 
-    if su:
-        lines.extend(su.lines)
-        _log_append(log, "SingleUserPatch: found")
-        off_line = next((line for line in su.lines if line.startswith(f"SingleUserOffset.{arch}=")), "")
-        code_line = next((line for line in su.lines if line.startswith(f"SingleUserCode.{arch}=")), "")
+    return su, su_func_start
+
+
+def _emit_patch_result(
+    log: list[str], ctx, result: PatchResult | None, arch: str, label: str,
+    func_start: int | None, lines: list[str], decode_len: int = 0x800,
+    before: int = 3, after: int = 3,
+) -> None:
+    """Append patch result lines to output and log disasm context on success.
+
+    ``label`` is used for log messages (e.g. "SingleUserPatch: found").
+    The INI line prefix is derived by stripping "Patch" (e.g. "SingleUserOffset.x64=").
+    """
+    line_prefix = label[:-5] if label.endswith("Patch") else label
+    if result:
+        lines.extend(result.lines)
+        _log_append(log, f"{label}: found")
+        off_line = next((line for line in result.lines if line.startswith(f"{line_prefix}Offset.{arch}=")), "")
+        code_line = next((line for line in result.lines if line.startswith(f"{line_prefix}Code.{arch}=")), "")
         if off_line:
-            _log_append(log, f"SingleUserPatch: {off_line}")
+            _log_append(log, f"{label}: {off_line}")
         if code_line:
-            _log_append(log, f"SingleUserPatch: {code_line}")
-        if off_line and su_func_start is not None:
+            _log_append(log, f"{label}: {code_line}")
+        if off_line and func_start is not None:
             try:
                 off_rva = int(off_line.split("=", 1)[1], 16)
-                _log_disasm_context(log, ctx, func_start_rva=su_func_start, target_rva=off_rva, label="SingleUserPatch")
+                _log_disasm_context(log, ctx, func_start_rva=func_start, target_rva=off_rva,
+                                    label=label, decode_len=decode_len, before=before, after=after)
             except Exception as e:
-                _log_append(log, f"SingleUserPatch: disasm context parse failed: {e}")
+                _log_append(log, f"{label}: disasm context parse failed: {e}")
     else:
-        lines.append("ERROR: SingleUserPatch not found")
-        _log_append(log, "SingleUserPatch: NOT found")
+        lines.append(f"ERROR: {label} not found")
+        _log_append(log, f"{label}: NOT found")
 
-    dp_func_rva = _resolve_jmp_stub_x86(mem.image, mem.image_base, addrs["CDefPolicy_Query"], text_funcs)
-    _log_append(log, f"DefPolicyPatch: resolved func RVA 0x{dp_func_rva:X} (from xref RVA 0x{addrs['CDefPolicy_Query']:X})")
-    dp = def_policy_patch(ctx, start_rva=dp_func_rva)
-    if dp:
-        lines.extend(dp.lines)
-        _log_append(log, "DefPolicyPatch: found")
-        try:
-            off_line = next((line for line in dp.lines if line.startswith(f"DefPolicyOffset.{arch}=")), "")
-            if off_line:
-                off_rva = int(off_line.split("=", 1)[1], 16)
-                _log_disasm_context(
-                    log, ctx,
-                    func_start_rva=dp_func_rva,
-                    target_rva=off_rva,
-                    label="DefPolicyPatch",
-                    decode_len=0x800,
-                )
-        except Exception as e:
-            _log_append(log, f"DefPolicyPatch: disasm context failed: {e}")
-    else:
-        lines.append("ERROR: DefPolicyPatch patten not found")
-        _log_append(log, "DefPolicyPatch: NOT found")
 
-    if ver.ms <= 0x00060001:
-        _write_log(log_path, log)
-        return NoSymbolResult(text="\n".join(lines) + "\n")
-
-    if ver.ms == 0x00060002:
-        start_va = mem.image_base + allow_remote_xref
-        data = mem.image[allow_remote_xref:allow_remote_xref + 0x400]
-        dec = Decoder(bitness, data, ip=start_va)
-        for insn in dec:
-            if insn.mnemonic == Mnemonic.CALL and insn.op0_kind in (OpKind.NEAR_BRANCH32, OpKind.NEAR_BRANCH64):
-                off = int(insn.near_branch_target - mem.image_base)
-                lines.append(f"SLPolicyInternal.{arch}=1")
-                lines.append(f"SLPolicyOffset.{arch}={off:X}")
-                lines.append(f"SLPolicyFunc.{arch}=New_Win8SL")
-                _write_log(log_path, log)
-                return NoSymbolResult(text="\n".join(lines) + "\n")
-        lines.append("ERROR: SLGetWindowsInformationDWORDWrapper not found")
-        _write_log(log_path, log)
-        return NoSymbolResult(text="\n".join(lines) + "\n")
-
-    lo = local_only_patch(
-        ctx,
-        start_rva=addrs["GetInstanceOfTSLicense"],
-        target_rva=addrs["IsLicenseTypeLocalOnly"],
-    )
-    if lo:
-        lines.extend(lo.lines)
-        _log_append(log, "LocalOnlyPatch: found")
-        try:
-            off_line = next((line for line in lo.lines if line.startswith(f"LocalOnlyOffset.{arch}=")), "")
-            if off_line:
-                off_rva = int(off_line.split("=", 1)[1], 16)
-                _log_disasm_context(
-                    log, ctx,
-                    func_start_rva=addrs["GetInstanceOfTSLicense"],
-                    target_rva=off_rva,
-                    label="LocalOnlyPatch",
-                    decode_len=0x1200,
-                )
-        except Exception as e:
-            _log_append(log, f"LocalOnlyPatch: disasm context failed: {e}")
-    else:
-        lines.append("ERROR: LocalOnlyPatch patten not found")
-        _log_append(log, "LocalOnlyPatch: NOT found")
-
-    csl_init_rva = addrs["CSLQuery_Initialize"]
-    csl_init_len = func_sizes.get("CSLQuery_Initialize", 0x11000)
-    _log_append(log, f"SLInitHook: CSLQuery::Initialize RVA 0x{csl_init_rva:X}")
-    _log_disasm_context(
-        log, ctx,
-        func_start_rva=csl_init_rva,
-        target_rva=csl_init_rva,
-        label="SLInitHook",
-        decode_len=0x200,
-        before=0,
-        after=10,
-    )
-    lines.append(f"SLInitHook.{arch}=1")
-    lines.append(f"SLInitOffset.{arch}={csl_init_rva:X}")
-    lines.append(f"SLInitFunc.{arch}=New_CSLQuery_Initialize")
-
-    lines.append("")
-    lines.append(f"[{ver.to_ini_section()}-SLInit]")
-
-    keys = {
-        "TerminalServices-RemoteConnectionManager-AllowRemoteConnections": "bRemoteConnAllowed",
-        "TerminalServices-RemoteConnectionManager-AllowMultipleSessions": "bFUSEnabled",
-        "TerminalServices-RemoteConnectionManager-AllowAppServerMode": "bAppServerAllowed",
-        "TerminalServices-RemoteConnectionManager-AllowMultimon": "bMultimonAllowed",
-        "TerminalServices-RemoteConnectionManager-MaxUserSessions": "lMaxUserSessions",
-        "TerminalServices-RemoteConnectionManager-ce0ad219-4670-4988-98fb-89b14c2f072b-MaxSessions": "ulMaxDebugSessions",
-    }
-    str_rvas: dict[str, int] = {}
-    for s in keys:
-        rva = _find_str(s.encode("utf-16le"))
-        if rva is not None:
-            str_rvas[s] = rva
-
-    var_rvas: dict[str, int] = {"bServerSku": 0, "bInitialized": 0}
-    for v in keys.values():
-        var_rvas[v] = 0
-
-    current = "bServerSku"
-    scan_len = csl_init_len if csl_init_len > 0 else 0x11000
-    start_va = mem.image_base + csl_init_rva
-    code = mem.image[csl_init_rva:csl_init_rva + scan_len]
-    dec = Decoder(bitness, code, ip=start_va)
-
-    for insn in dec:
-        if (
-            var_rvas.get(current, 0) == 0
-            and insn.mnemonic == Mnemonic.MOV
-            and insn.op0_kind == OpKind.MEMORY
-            and insn.memory_base == Register.NONE
-            and insn.memory_index == Register.NONE
-            and insn.op1_kind == OpKind.REGISTER
-            and insn.op1_register == Register.EAX
-        ):
-            abs_va = insn.memory_displacement
-            if abs_va > mem.image_base:
-                rva = abs_va - mem.image_base
-                var_rvas[current] = rva
-                _log_append(log, f"SLInitScan: {current} RVA 0x{rva:X} via {_fmt_insn(ctx, insn)}")
-            continue
-
-        if (
-            insn.mnemonic == Mnemonic.MOV
-            and insn.op0_kind == OpKind.REGISTER
-            and insn.op0_register == Register.ECX
-            and insn.op1_kind == OpKind.IMMEDIATE32
-        ):
-            imm_va = int(insn.immediate32)
-            imm_rva = imm_va - mem.image_base
-            for s, key in keys.items():
-                rva = str_rvas.get(s)
-                if rva is not None and imm_rva == rva:
-                    current = key
-                    _log_append(log, f"SLInitScan: policy '{key}' selected via {_fmt_insn(ctx, insn)}")
-                    break
-            continue
-
-        if (
-            insn.mnemonic == Mnemonic.MOV
-            and insn.op0_kind == OpKind.MEMORY
-            and insn.memory_base == Register.NONE
-            and insn.memory_index == Register.NONE
-            and insn.op1_kind in (OpKind.IMMEDIATE8, OpKind.IMMEDIATE32)
-        ):
-            imm = insn.immediate8 if insn.op1_kind == OpKind.IMMEDIATE8 else insn.immediate32
-            if imm == 1:
-                abs_va = insn.memory_displacement
-                if abs_va > mem.image_base:
-                    rva = abs_va - mem.image_base
-                    var_rvas["bInitialized"] = rva
-                    _log_append(log, f"SLInitScan: bInitialized RVA 0x{rva:X} via {_fmt_insn(ctx, insn)}")
-                break
-
-    for k in ("bServerSku",) + tuple(keys.values()) + ("bInitialized",):
-        v = var_rvas.get(k, 0)
-        if v:
-            lines.append(f"{k}.{arch}={v:X}")
-        else:
-            lines.append(f"ERROR: {k} not found")
-
-    _write_log(log_path, log)
-    return NoSymbolResult(text="\n".join(lines) + "\n")
+# SLInit policy-string → global-variable-name mapping (shared by both archs).
+_SLINIT_KEYS = {
+    "TerminalServices-RemoteConnectionManager-AllowRemoteConnections": "bRemoteConnAllowed",
+    "TerminalServices-RemoteConnectionManager-AllowMultipleSessions": "bFUSEnabled",
+    "TerminalServices-RemoteConnectionManager-AllowAppServerMode": "bAppServerAllowed",
+    "TerminalServices-RemoteConnectionManager-AllowMultimon": "bMultimonAllowed",
+    "TerminalServices-RemoteConnectionManager-MaxUserSessions": "lMaxUserSessions",
+    "TerminalServices-RemoteConnectionManager-ce0ad219-4670-4988-98fb-89b14c2f072b-MaxSessions": "ulMaxDebugSessions",
+}
 
 
 def analyze(
@@ -639,231 +387,132 @@ def analyze(
     ver: FileVersion,
     *,
     log_path: str | Path | None = None,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> NoSymbolResult:
+    """Analyze termsrv.dll without PDB symbols and emit rdpwrap.ini sections.
+
+    Architecture-specific differences (x86 vs x64) are handled by an
+    ``ArchStrategy`` object selected via :func:`nosymbol_arch.get_strategy`.
+    The main flow is a single linear path shared by both architectures.
+    """
+    global _progress_callback
+    _progress_callback = progress_callback
+    try:
+        return _analyze_impl(pe, dll_path, ver, log_path=log_path)
+    finally:
+        _progress_callback = None
+
+
+def _analyze_impl(
+    pe: pefile.PE,
+    dll_path: Path,
+    ver: FileVersion,
+    *,
+    log_path: str | Path | None = None,
+) -> NoSymbolResult:
+    """Internal implementation — separated so try/finally can clear the callback."""
+    from nosymbol_arch import get_strategy
+
     log: list[str] = []
     _log_append(log, f"nosymbol analyze start: {dll_path}")
     _log_append(log, f"version: {ver.to_ini_section()}")
     mem = load_memory_image(pe)
     _log_append(log, f"image_base: 0x{mem.image_base:X}, is_64: {mem.is_64}")
-    bitness = 64 if mem.is_64 else 32
-    arch = "x64" if mem.is_64 else "x86"
+
+    strat = get_strategy(mem.is_64)
+    bitness = strat.bitness
+    arch = strat.arch
     ctx = DisasmContext(bitness=bitness, image_base=mem.image_base, image=mem.image)
 
-    if not mem.is_64:
-        return _analyze_x86(pe, dll_path, ver, mem, ctx, log, log_path)
+    # --- 1. Locate C++ class/method name strings --------------------------
+    strings = _locate_strings(pe, mem.image)
+    for name, rva in strings.items():
+        _log_append(log, f"string RVAs: {name}={rva and hex(rva)}")
 
-    rdata_sec = _find_section(pe, b".rdata") or pe.sections[0]
-    sec_name = rdata_sec.Name.rstrip(b"\x00").decode(errors="ignore")
-    _log_append(log, f"scan section: {sec_name} @ RVA 0x{int(rdata_sec.VirtualAddress):X}")
-
-    q = _pattern_match_in_section(mem.image, rdata_sec, b"CDefPolicy::Query")
-    local_only = _pattern_match_in_section(mem.image, rdata_sec, b"CSLQuery::IsTerminalTypeLocalOnly")
-    single_enabled = _pattern_match_in_section(mem.image, rdata_sec, b"CSessionArbitrationHelper::IsSingleSessionPerUserEnabled")
-    if single_enabled is None:
-        single_enabled = _pattern_match_in_section(mem.image, rdata_sec, b"CSessionArbitrationHelper::IsSingleSessionPerUserEnabled".split(b"::")[-1])
-    inst_license = _pattern_match_in_section(mem.image, rdata_sec, b"CEnforcementCore::GetInstanceOfTSLicense ")
-    if inst_license is None:
-        inst_license = _pattern_match_in_section(mem.image, rdata_sec, b"CEnforcementCore::GetInstanceOfTSLicense")
-    single_user = _pattern_match_in_section(mem.image, rdata_sec, b"CUtils::IsSingleSessionPerUser")
-    if single_user is None:
-        single_user = _pattern_match_in_section(mem.image, rdata_sec, b"IsSingleSessionPerUser")
-
-    _log_append(log, f"rdata string RVAs: CDefPolicy::Query={q and hex(q)}")
-    _log_append(log, f"rdata string RVAs: CSLQuery::IsTerminalTypeLocalOnly={local_only and hex(local_only)}")
-    _log_append(log, f"rdata string RVAs: IsSingleSessionPerUserEnabled={single_enabled and hex(single_enabled)}")
-    _log_append(log, f"rdata string RVAs: GetInstanceOfTSLicense={inst_license and hex(inst_license)}")
-    _log_append(log, f"rdata string RVAs: IsSingleSessionPerUser={single_user and hex(single_user)}")
-
-    allow_remote = _pattern_match_in_section(
-        mem.image, rdata_sec, "TerminalServices-RemoteConnectionManager-AllowRemoteConnections".encode("utf-16le")
-    )
-
-    if None in (q, local_only, single_enabled, inst_license, single_user, allow_remote):
-        _log_append(log, "ERROR: required .rdata strings missing")
+    missing_strs = [n for n, v in strings.items() if v is None]
+    if missing_strs:
+        _log_append(log, f"ERROR: required strings missing: {', '.join(missing_strs)}")
         _write_log(log_path, log)
-        raise RuntimeError("Failed to locate required .rdata strings (nosymbol mode)")
+        raise RuntimeError(f"Failed to locate required strings (nosymbol): {', '.join(missing_strs)}")
 
-    memset_iat = (
-        find_iat_rva(pe, "msvcrt.dll", "memset")
-        or find_iat_rva(pe, "ucrtbase.dll", "memset")
-        or find_iat_rva(pe, "api-ms-win-crt-string-l1-1-0.dll", "memset")
-    )
-    if memset_iat is None:
-        _log_append(log, "ERROR: memset import not found")
-        _write_log(log_path, log)
-        raise RuntimeError("memset import not found")
+    q = strings["CDefPolicy::Query"]
+    local_only = strings["CSLQuery::IsTerminalTypeLocalOnly"]
+    single_enabled = strings["IsSingleSessionPerUserEnabled"]
+    inst_license = strings["GetInstanceOfTSLicense"]
+    single_user = strings["IsSingleSessionPerUser"]
+    allow_remote = strings["AllowRemoteConnections"]
 
-    _log_append(log, f"IAT RVAs: memset=0x{memset_iat:X}")
+    # --- 2. Locate IAT slots (memset, VerifyVersionInfoW) ------------------
+    memset_iat, verify_iat = _locate_iats(pe, log)
 
-    verify_iat = find_iat_rva(pe, "api-ms-win-core-kernel32-legacy-l1-1-1.dll", "VerifyVersionInfoW")
-    if verify_iat is None:
-        verify_iat = find_iat_rva(pe, "kernel32.dll", "VerifyVersionInfoW")
-    _log_append(log, f"IAT RVAs: VerifyVersionInfoW={(hex(verify_iat) if verify_iat is not None else None)}")
-
-    runtime_funcs = parse_exception_directory_x64(pe, mem.image)
-    if not runtime_funcs:
-        _log_append(log, "ERROR: no exception directory")
-        _write_log(log_path, log)
-        raise RuntimeError("No exception directory found (x64)")
-    _log_append(log, f"runtime functions (exception dir): {len(runtime_funcs)}")
-
-    addrs: dict[str, int] = {}
-    csl_init_len: int | None = None
-    allow_remote_xref: int | None = None
-
+    # --- 3. Scan functions for string cross-references --------------------
     targets_required = {
-        "CDefPolicy_Query": q,
         "GetInstanceOfTSLicense": inst_license,
         "IsSingleSessionPerUserEnabled": single_enabled,
         "IsLicenseTypeLocalOnly": local_only,
         "CSLQuery_Initialize": allow_remote,
     }
-    targets_optional = {
-        "IsSingleSessionPerUser": single_user,
-    }
+    if arch == "x64":
+        targets_required["CDefPolicy_Query"] = q
+    targets_optional = {"IsSingleSessionPerUser": single_user}
     targets = dict(targets_required)
     targets.update(targets_optional)
 
-    for rf in runtime_funcs:
-        func_len = int(rf.end_rva - rf.begin_rva)
-        if func_len <= 0:
-            continue
-        for key, target in list(targets.items()):
-            if key in addrs:
-                continue
-            xref = _xref_lea_rip(mem.image, mem.image_base, bitness, rf.begin_rva, func_len, target)
-            if not xref:
-                continue
-            top = backtrace_x64(mem.image, rf)
-            addrs[key] = int(top.begin_rva)
-            _log_append(log, f"xref found: {key} -> function RVA 0x{addrs[key]:X}")
-            if key == "CSLQuery_Initialize":
-                csl_init_len = int(top.end_rva - top.begin_rva)
-                allow_remote_xref = int(xref)
-        if len(addrs) == len(targets):
-            break
+    addrs, func_sizes, xref_map = strat.scan_function_xrefs(
+        mem.image, mem.image_base, pe, targets, log,
+    )
 
     missing = [k for k in targets_required if k not in addrs]
     if missing:
         _log_append(log, f"ERROR: missing function xrefs: {', '.join(missing)}")
         _write_log(log_path, log)
         raise RuntimeError(f"Failed to find function xrefs: {', '.join(missing)}")
-    if csl_init_len is None or allow_remote_xref is None:
+
+    allow_remote_xref = xref_map.get("CSLQuery_Initialize")
+    if allow_remote_xref is None:
         _log_append(log, "ERROR: CSLQuery::Initialize not located")
         _write_log(log_path, log)
         raise RuntimeError("Failed to locate CSLQuery::Initialize")
 
-    lines: list[str] = []
-    lines.append(f"[{ver.to_ini_section()}]")
+    # x86 locates CDefPolicy_Query separately (CMP-pattern pre-scan).
+    if "CDefPolicy_Query" not in addrs:
+        funcs = strat.iter_functions(pe, mem.image, mem.image_base)
+        dp_query_rva = strat.find_def_policy_query(ctx, funcs, q, mem.image, mem.image_base)
+        if dp_query_rva is not None:
+            addrs["CDefPolicy_Query"] = dp_query_rva
+            _log_append(log, f"CDefPolicy_Query: found at RVA 0x{dp_query_rva:X}")
+        else:
+            _log_append(log, "ERROR: CDefPolicy_Query not found")
+            _write_log(log_path, log)
+            raise RuntimeError("Failed to find CDefPolicy_Query")
 
-    su_start: int | None = None
-    su_func_start: int | None = None
-    su: PatchResult | None = None
+    # --- 4. Build INI main section ----------------------------------------
+    lines: list[str] = [f"[{ver.to_ini_section()}]"]
 
-    if addrs.get("IsSingleSessionPerUserEnabled") is not None:
-        _log_append(log, f"SingleUser scan start RVA (IsSingleSessionPerUserEnabled): 0x{int(addrs['IsSingleSessionPerUserEnabled']):X}")
-        su = single_user_patch(
-            ctx,
-            start_rva=int(addrs["IsSingleSessionPerUserEnabled"]),
-            memset_target_rva=memset_iat,
-            verifyversion_iat_rva=verify_iat,
-            direct_call=False,
-        )
-        if su is not None:
-            su_start = int(addrs["IsSingleSessionPerUserEnabled"])
-            su_func_start = su_start
+    # SingleUserPatch
+    su, su_func_start = _apply_single_user_patch(
+        strat, ctx, log, addrs, pe, mem, memset_iat, verify_iat,
+    )
+    _emit_patch_result(log, ctx, su, arch, "SingleUserPatch", su_func_start, lines,
+                       decode_len=0x800, before=20, after=15)
 
-    if su is None and addrs.get("IsSingleSessionPerUser") is not None:
-        _log_append(log, f"SingleUser scan start RVA (IsSingleSessionPerUser): 0x{int(addrs['IsSingleSessionPerUser']):X}")
-        su = single_user_patch(
-            ctx,
-            start_rva=int(addrs["IsSingleSessionPerUser"]),
-            memset_target_rva=memset_iat,
-            verifyversion_iat_rva=verify_iat,
-            direct_call=False,
-        )
-        if su is not None:
-            su_start = int(addrs["IsSingleSessionPerUser"])
-            su_func_start = su_start
+    # DefPolicyPatch
+    dp_func_rva = addrs["CDefPolicy_Query"]
+    if arch == "x86":
+        from nosymbol import _resolve_jmp_stub_x86
+        funcs = strat.iter_functions(pe, mem.image, mem.image_base)
+        dp_func_rva = _resolve_jmp_stub_x86(mem.image, mem.image_base, dp_func_rva, funcs)
+    _log_append(log, f"DefPolicyPatch: resolved func RVA 0x{int(dp_func_rva):X}")
+    dp = def_policy_patch(ctx, start_rva=int(dp_func_rva))
+    _emit_patch_result(log, ctx, dp, arch, "DefPolicyPatch", int(dp_func_rva), lines,
+                       decode_len=0x800)
 
-    if su is None and verify_iat is not None:
-        best: PatchResult | None = None
-        best_func_start: int | None = None
-        for rf in runtime_funcs:
-            res = single_user_patch(
-                ctx,
-                start_rva=int(rf.begin_rva),
-                memset_target_rva=memset_iat,
-                verifyversion_iat_rva=verify_iat,
-                direct_call=False,
-            )
-            if res is None:
-                continue
-            code_line = next((line for line in res.lines if line.startswith(f"SingleUserCode.{arch}=")), "")
-            if "mov_eax_1_nop_" in code_line:
-                best = res
-                best_func_start = int(rf.begin_rva)
-                break
-            if best is None:
-                best = res
-                best_func_start = int(rf.begin_rva)
-        su = best
-        if best_func_start is not None:
-            su_func_start = best_func_start
-
-    if su:
-        lines.extend(su.lines)
-        _log_append(log, "SingleUserPatch: found")
-        off_line = next((line for line in su.lines if line.startswith(f"SingleUserOffset.{arch}=")), "")
-        code_line = next((line for line in su.lines if line.startswith(f"SingleUserCode.{arch}=")), "")
-        if off_line:
-            _log_append(log, f"SingleUserPatch: {off_line}")
-        if code_line:
-            _log_append(log, f"SingleUserPatch: {code_line}")
-        if off_line and su_func_start is not None:
-            try:
-                off_rva = int(off_line.split("=", 1)[1], 16)
-                _log_disasm_context(
-                    log, ctx,
-                    func_start_rva=int(su_func_start),
-                    target_rva=off_rva,
-                    label="SingleUserPatch",
-                    decode_len=0x800,
-                    before=20,
-                    after=15,
-                )
-            except Exception as e:
-                _log_append(log, f"SingleUserPatch: disasm context parse failed: {e}")
-    else:
-        lines.append("ERROR: SingleUserPatch not found")
-        _log_append(log, "SingleUserPatch: NOT found")
-
-    dp = def_policy_patch(ctx, start_rva=addrs["CDefPolicy_Query"])
-    if dp:
-        lines.extend(dp.lines)
-        _log_append(log, "DefPolicyPatch: found")
-        try:
-            off_line = next((line for line in dp.lines if line.startswith(f"DefPolicyOffset.{arch}=")), "")
-            if off_line:
-                off_rva = int(off_line.split("=", 1)[1], 16)
-                _log_disasm_context(
-                    log,
-                    ctx,
-                    func_start_rva=int(addrs["CDefPolicy_Query"]),
-                    target_rva=off_rva,
-                    label="DefPolicyPatch",
-                    decode_len=0x800,
-                )
-        except Exception as e:
-            _log_append(log, f"DefPolicyPatch: disasm context failed: {e}")
-    else:
-        lines.append("ERROR: DefPolicyPatch patten not found")
-        _log_append(log, "DefPolicyPatch: NOT found")
-
+    # Vista / Win7: no SLInit, return early.
     if ver.ms <= 0x00060001:
         _write_log(log_path, log)
         return NoSymbolResult(text="\n".join(lines) + "\n")
 
+    # Win8: SL hook via SLGetWindowsInformationDWORDWrapper.
     if ver.ms == 0x00060002:
         start_va = mem.image_base + allow_remote_xref
         data = mem.image[allow_remote_xref:allow_remote_xref + 0x400]
@@ -876,49 +525,25 @@ def analyze(
                 lines.append(f"SLPolicyFunc.{arch}=New_Win8SL")
                 _write_log(log_path, log)
                 return NoSymbolResult(text="\n".join(lines) + "\n")
-
         lines.append("ERROR: SLGetWindowsInformationDWORDWrapper not found")
         _write_log(log_path, log)
         return NoSymbolResult(text="\n".join(lines) + "\n")
 
+    # LocalOnlyPatch
     lo = local_only_patch(
         ctx,
         start_rva=addrs["GetInstanceOfTSLicense"],
         target_rva=addrs["IsLicenseTypeLocalOnly"],
     )
-    if lo:
-        lines.extend(lo.lines)
-        _log_append(log, "LocalOnlyPatch: found")
-        try:
-            off_line = next((line for line in lo.lines if line.startswith(f"LocalOnlyOffset.{arch}=")), "")
-            if off_line:
-                off_rva = int(off_line.split("=", 1)[1], 16)
-                _log_disasm_context(
-                    log,
-                    ctx,
-                    func_start_rva=int(addrs["GetInstanceOfTSLicense"]),
-                    target_rva=off_rva,
-                    label="LocalOnlyPatch",
-                    decode_len=0x1200,
-                )
-        except Exception as e:
-            _log_append(log, f"LocalOnlyPatch: disasm context failed: {e}")
-    else:
-        lines.append("ERROR: LocalOnlyPatch patten not found")
-        _log_append(log, "LocalOnlyPatch: NOT found")
+    _emit_patch_result(log, ctx, lo, arch, "LocalOnlyPatch",
+                       int(addrs["GetInstanceOfTSLicense"]), lines, decode_len=0x1200)
 
+    # --- 5. SLInit hook + global variable scan ----------------------------
     csl_init_rva = addrs["CSLQuery_Initialize"]
+    csl_init_len = func_sizes.get("CSLQuery_Initialize", 0x11000)
     _log_append(log, f"SLInitHook: CSLQuery::Initialize RVA 0x{int(csl_init_rva):X}")
-    _log_disasm_context(
-        log,
-        ctx,
-        func_start_rva=int(csl_init_rva),
-        target_rva=int(csl_init_rva),
-        label="SLInitHook",
-        decode_len=0x200,
-        before=0,
-        after=10,
-    )
+    _log_disasm_context(log, ctx, func_start_rva=int(csl_init_rva), target_rva=int(csl_init_rva),
+                        label="SLInitHook", decode_len=0x200, before=0, after=10)
     lines.append(f"SLInitHook.{arch}=1")
     lines.append(f"SLInitOffset.{arch}={csl_init_rva:X}")
     lines.append(f"SLInitFunc.{arch}=New_CSLQuery_Initialize")
@@ -926,84 +551,19 @@ def analyze(
     lines.append("")
     lines.append(f"[{ver.to_ini_section()}-SLInit]")
 
-    keys = {
-        "TerminalServices-RemoteConnectionManager-AllowRemoteConnections": "bRemoteConnAllowed",
-        "TerminalServices-RemoteConnectionManager-AllowMultipleSessions": "bFUSEnabled",
-        "TerminalServices-RemoteConnectionManager-AllowAppServerMode": "bAppServerAllowed",
-        "TerminalServices-RemoteConnectionManager-AllowMultimon": "bMultimonAllowed",
-        "TerminalServices-RemoteConnectionManager-MaxUserSessions": "lMaxUserSessions",
-        "TerminalServices-RemoteConnectionManager-ce0ad219-4670-4988-98fb-89b14c2f072b-MaxSessions": "ulMaxDebugSessions",
-    }
+    # Locate policy-string RVAs (wide strings) for SLInit scan.
     str_rvas: dict[str, int] = {}
-    for s in keys:
-        rva = _pattern_match_in_section(mem.image, rdata_sec, s.encode("utf-16le"))
+    for s in _SLINIT_KEYS:
+        rva = _pattern_match_in_section(mem.image, _find_section(pe, b".rdata") or pe.sections[0], s.encode("utf-16le"))
         if rva is not None:
             str_rvas[s] = int(rva)
 
-    var_rvas: dict[str, int] = {"bServerSku": 0, "bInitialized": 0}
-    for v in keys.values():
-        var_rvas[v] = 0
+    var_rvas = strat.scan_slinit_globals(
+        mem.image, mem.image_base, int(csl_init_rva), csl_init_len,
+        str_rvas, _SLINIT_KEYS, log, ctx,
+    )
 
-    current = "bServerSku"
-
-    scan_len = csl_init_len if csl_init_len and csl_init_len > 0 else 0x11000
-    start_va = mem.image_base + csl_init_rva
-    code = mem.image[csl_init_rva:csl_init_rva + scan_len]
-    dec = Decoder(bitness, code, ip=start_va)
-    for insn in dec:
-        if (
-            var_rvas.get(current, 0) == 0
-            and insn.mnemonic == Mnemonic.MOV
-            and insn.op0_kind == OpKind.MEMORY
-            and insn.memory_base == Register.RIP
-            and insn.op1_kind == OpKind.REGISTER
-            and insn.op1_register == Register.EAX
-        ):
-            if insn.is_ip_rel_memory_operand:
-                var_rvas[current] = int(insn.ip_rel_memory_address - mem.image_base)
-                _log_append(
-                    log,
-                    f"SLInitScan: {current} RVA 0x{var_rvas[current]:X} via {_fmt_insn(ctx, insn)}",
-                )
-            continue
-
-        if (
-            insn.mnemonic == Mnemonic.LEA
-            and insn.op0_kind == OpKind.REGISTER
-            and insn.op0_register == Register.RCX
-            and insn.op1_kind == OpKind.MEMORY
-            and insn.memory_base == Register.RIP
-        ):
-            if not insn.is_ip_rel_memory_operand:
-                continue
-            target = int(insn.ip_rel_memory_address - mem.image_base)
-            for s, key in keys.items():
-                rva = str_rvas.get(s)
-                if rva is not None and target == rva:
-                    current = key
-                    _log_append(
-                        log,
-                        f"SLInitScan: policy '{key}' selected via {_fmt_insn(ctx, insn)}",
-                    )
-                    break
-            continue
-
-        if (
-            insn.mnemonic == Mnemonic.MOV
-            and insn.op0_kind == OpKind.MEMORY
-            and insn.memory_base == Register.RIP
-            and insn.op1_kind in (OpKind.IMMEDIATE8, OpKind.IMMEDIATE32)
-            and (insn.immediate8 == 1 if insn.op1_kind == OpKind.IMMEDIATE8 else insn.immediate32 == 1)
-        ):
-            if insn.is_ip_rel_memory_operand:
-                var_rvas["bInitialized"] = int(insn.ip_rel_memory_address - mem.image_base)
-                _log_append(
-                    log,
-                    f"SLInitScan: bInitialized RVA 0x{var_rvas['bInitialized']:X} via {_fmt_insn(ctx, insn)}",
-                )
-            break
-
-    for k in ("bServerSku",) + tuple(keys.values()) + ("bInitialized",):
+    for k in ("bServerSku",) + tuple(_SLINIT_KEYS.values()) + ("bInitialized",):
         v = var_rvas.get(k, 0)
         if v:
             lines.append(f"{k}.{arch}={v:X}")
