@@ -161,7 +161,15 @@ def def_policy_patch(ctx: DisasmContext, start_rva: int) -> PatchResult | None:
 
                             reg1 = reg_name(mov_target2)
                             reg2 = reg_name(alias_base)
-                            off_rva = int(insn.ip - ctx.image_base)
+                            # Offset = instruction immediately before CMP
+                            # (the second of the two check MOVs).  The first
+                            # MOV is preserved.  This handles both orderings:
+                            #   0x638 first → 0x63C second (before CMP)
+                            #   0x63C first → 0x638 second (before CMP)
+                            # Patch is 12 bytes (mov dword [base+0x638],0x100
+                            # + jmp short) and must cover exactly: second MOV
+                            # (7B) + CMP (3B) + JNE (2B).
+                            off_rva = int(insns[k - 1].ip - ctx.image_base)
                             return PatchResult(
                                 lines=[
                                     "DefPolicyPatch.x64=1",

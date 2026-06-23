@@ -28,7 +28,9 @@ from _asmharness import (
     jne_rel64,
     jns_rel64,
     js_rel64,
+    mov_r32_rm32,
     mov_r64_rm64,
+    mov_r64_r64,
     nop,
     place_code,
     make_image,
@@ -270,6 +272,82 @@ class TestDefPolicyPatch:
         assert "DefPolicyCode.x64=CDefPolicy_Query_rax_rcx_jmp" in r.lines
         # Offset = MOV's RVA (first instruction = FUNC).
         assert f"DefPolicyOffset.x64={self.FUNC:X}" in r.lines
+
+    def test_two_mov_cmp_reg_jne_offset_after_638_mov(self):
+        """Path 2 (two-register CMP): offset must be the instruction AFTER
+        the 0x638 MOV, not the 0x638 MOV itself.
+
+        Simulates the real termsrv.dll 10.0.28000.2307 (x64) pattern:
+
+            mov r8d, [rcx+0x63C]   ; first 0x63C MOV (sets mov_base=RCX)
+            mov rdi,  rcx           ; alias: RDI → RCX
+            mov r9d, [rdi+0x638]   ; 0x638 MOV (MaxAllowed → r9d)  PRESERVED
+            mov r8d, [rdi+0x63C]   ; 0x63C MOV (InUse → r8d)       ← Patch start
+            cmp r8d, r9d           ;                               ← overwritten
+            jne success            ;                               ← overwritten
+
+        Patch code CDefPolicy_Query_r9d_rdi_jmp is 12 bytes:
+            mov dword [rdi+0x638], 0x100  (10B)
+            jmp short                     (2B)
+        which overwrites exactly: 0x63C MOV (7B) + CMP (3B) + JNE (2B) = 12B.
+        """
+        mem63c_rcx = MemoryOperand(base=Register.RCX, displ=0x63C)
+        mem638_rdi = MemoryOperand(base=Register.RDI, displ=0x638)
+        mem63c_rdi = MemoryOperand(base=Register.RDI, displ=0x63C)
+        cmp_r8d_r9d = Instruction.create_reg_reg(
+            Code.CMP_R32_RM32, Register.R8D, Register.R9D
+        )
+        ctx = _build_image(64, self.FUNC, [
+            mov_r32_rm32(Register.R8D, mem63c_rcx),   # 0x1000: 7B → first 0x63C MOV
+            mov_r64_r64(Register.RDI, Register.RCX),   # 0x1007: 3B → alias
+            mov_r32_rm32(Register.R9D, mem638_rdi),    # 0x100A: 7B → 0x638 MOV (preserved)
+            mov_r32_rm32(Register.R8D, mem63c_rdi),    # 0x1011: 7B → 0x63C MOV (patch start)
+            cmp_r8d_r9d,                                # 0x1018: 3B → CMP
+            jne_rel64(self.FUNC + 0x40),               # 0x101B: 6B → JNE
+        ])
+        r = def_policy_patch(ctx, start_rva=self.FUNC)
+        assert r is not None
+        assert "DefPolicyPatch.x64=1" in r.lines
+        assert "DefPolicyCode.x64=CDefPolicy_Query_r9d_rdi_jmp" in r.lines
+        # Offset = 0x1011 (instruction after the 0x638 MOV at 0x100A),
+        # NOT 0x100A (the 0x638 MOV itself).
+        assert "DefPolicyOffset.x64=1011" in r.lines
+
+    def test_two_mov_cmp_reg_jne_reversed_order(self):
+        """Path 2 with reversed MOV order (0x63C before 0x638).
+
+        Simulates the real termsrv.dll 10.0.26100.8521 (x64) pattern:
+
+            mov r8d, [rcx+0x63C]   ; first 0x63C MOV (sets mov_base=RCX)
+            mov rdi,  rcx           ; alias: RDI → RCX
+            mov r8d, [rdi+0x63C]   ; 0x63C MOV (first check)  PRESERVED
+            mov r9d, [rdi+0x638]   ; 0x638 MOV (second check) ← Patch start
+            cmp r8d, r9d           ;                         ← overwritten
+            jne success            ;                         ← overwritten
+
+        The 0x638 MOV is the second instruction (right before CMP), so the
+        offset must be its own address, not the next instruction's.
+        """
+        mem63c_rcx = MemoryOperand(base=Register.RCX, displ=0x63C)
+        mem638_rdi = MemoryOperand(base=Register.RDI, displ=0x638)
+        mem63c_rdi = MemoryOperand(base=Register.RDI, displ=0x63C)
+        cmp_r8d_r9d = Instruction.create_reg_reg(
+            Code.CMP_R32_RM32, Register.R8D, Register.R9D
+        )
+        ctx = _build_image(64, self.FUNC, [
+            mov_r32_rm32(Register.R8D, mem63c_rcx),   # 0x1000: 7B → first 0x63C MOV
+            mov_r64_r64(Register.RDI, Register.RCX),   # 0x1007: 3B → alias
+            mov_r32_rm32(Register.R8D, mem63c_rdi),    # 0x100A: 7B → 0x63C MOV (preserved)
+            mov_r32_rm32(Register.R9D, mem638_rdi),    # 0x1011: 7B → 0x638 MOV (patch start)
+            cmp_r8d_r9d,                                # 0x1018: 3B → CMP
+            jne_rel64(self.FUNC + 0x40),               # 0x101B: 6B → JNE
+        ])
+        r = def_policy_patch(ctx, start_rva=self.FUNC)
+        assert r is not None
+        assert "DefPolicyPatch.x64=1" in r.lines
+        assert "DefPolicyCode.x64=CDefPolicy_Query_r9d_rdi_jmp" in r.lines
+        # Offset = 0x638 MOV's RVA (0x1011, instruction right before CMP).
+        assert "DefPolicyOffset.x64=1011" in r.lines
 
 
 # ===========================================================================

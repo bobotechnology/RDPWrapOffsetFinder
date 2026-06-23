@@ -125,7 +125,7 @@ def mov_rm32_r32(mem: MemoryOperand, reg: int) -> Instruction:
 
 
 def mov_r64_r64(dst: int, src: int) -> Instruction:
-    return Instruction.create_reg_reg(Code.MOV_R64_R64, dst, src)
+    return Instruction.create_reg_reg(Code.MOV_RM64_R64, dst, src)
 
 
 def lea_r64_m(reg: int, mem: MemoryOperand) -> Instruction:
