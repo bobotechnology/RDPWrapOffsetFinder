@@ -192,7 +192,7 @@ def _scan_text_functions_x86(pe: pefile.PE, image: bytes, image_base: int) -> li
     return funcs
 
 
-def _xref_imm32_x86(image: bytes, image_base: int, func_rva: int, func_len: int, target_rva: int) -> int | None:
+def _xref_imm32_x86(image: bytes, image_base: int, func_rva: int, func_len: int, target_rva: int, *, allow_mem: bool = False) -> int | None:
     target_va = image_base + target_rva
     start_va = image_base + func_rva
     code = image[func_rva:func_rva + func_len]
@@ -201,8 +201,16 @@ def _xref_imm32_x86(image: bytes, image_base: int, func_rva: int, func_len: int,
         if insn.mnemonic == Mnemonic.PUSH and insn.op0_kind == OpKind.IMMEDIATE32:
             if int(insn.immediate32) == target_va:
                 return int(insn.next_ip - image_base)
-        if insn.mnemonic == Mnemonic.MOV:
-            if insn.op0_kind == OpKind.REGISTER and insn.op1_kind == OpKind.IMMEDIATE32:
+        if insn.mnemonic == Mnemonic.MOV and insn.op1_kind == OpKind.IMMEDIATE32:
+            # MOV reg, imm32 — load string address into register
+            if insn.op0_kind == OpKind.REGISTER:
+                if int(insn.immediate32) == target_va:
+                    return int(insn.next_ip - image_base)
+            # MOV [mem], imm32 — store string address in local variable
+            # (e.g., mov dword [ebp-10h], offset string)
+            # Only checked in fallback pass to avoid false positives in
+            # large functions where the immediate might match by coincidence.
+            elif allow_mem and insn.op0_kind == OpKind.MEMORY:
                 if int(insn.immediate32) == target_va:
                     return int(insn.next_ip - image_base)
     return None
@@ -261,13 +269,39 @@ def _locate_strings(pe: pefile.PE, image: bytes) -> dict[str, int | None]:
                 return rva
         return None
 
+    def _find_exact(pat: bytes) -> int | None:
+        """Find a null-terminated string. Does not match substrings of
+        longer strings (unlike _find which falls back to prefix search)."""
+        needle = pat + b"\x00"
+        sections = ([rdata] if rdata is not None else []) + \
+                   [s for s in pe.sections if s is not rdata]
+        for sec in sections:
+            start = int(sec.VirtualAddress)
+            size = int(getattr(sec, "Misc_VirtualSize", 0) or 0) or int(sec.SizeOfRawData)
+            hay = image[start:start + size]
+            idx = hay.find(needle)
+            if idx >= 0:
+                return start + idx
+        return None
+
     return {
         "CDefPolicy::Query": _find(b"CDefPolicy::Query"),
         "CSLQuery::IsTerminalTypeLocalOnly": _find(b"CSLQuery::IsTerminalTypeLocalOnly"),
         "IsSingleSessionPerUserEnabled": _find(b"CSessionArbitrationHelper::IsSingleSessionPerUserEnabled")
             or _find(b"IsSingleSessionPerUserEnabled"),
-        "GetInstanceOfTSLicense": _find(b"CEnforcementCore::GetInstanceOfTSLicense ")
-            or _find(b"CEnforcementCore::GetInstanceOfTSLicense"),
+        # Search order for GetInstanceOfTSLicense:
+        # 1. Error message prefix (only referenced in the function that calls
+        #    IsLicenseTypeLocalOnly — avoids ambiguity with other functions
+        #    that reference the short identifier)
+        # 2. Standalone CEnforcementCore::GetInstanceOfTSLicense\0 (x64)
+        # 3. Standalone GetInstanceOfTSLicense\0 (x86 fallback)
+        # 4. Legacy prefix searches (last resort)
+        "GetInstanceOfTSLicense": _find(b"CEnforcementCore::GetInstanceOfTSLicense FAILED")
+            or _find(b"CEnforcementCore::GetInstanceOfTSLicense ")
+            or _find(b"CEnforcementCore::GetInstanceOfTSLicense")
+            or _find_exact(b"CEnforcementCore::GetInstanceOfTSLicense")
+            or _find_exact(b"GetInstanceOfTSLicense")
+            or _find(b"GetInstanceOfTSLicense"),
         "IsSingleSessionPerUser": _find(b"CUtils::IsSingleSessionPerUser")
             or _find(b"IsSingleSessionPerUser"),
         "AllowRemoteConnections": _find("TerminalServices-RemoteConnectionManager-AllowRemoteConnections".encode("utf-16le")),

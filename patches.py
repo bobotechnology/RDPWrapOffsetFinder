@@ -26,7 +26,7 @@ def _is_rel_call_to(insn, target_va: int) -> bool:
 def local_only_patch(ctx: DisasmContext, start_rva: int, target_rva: int) -> PatchResult | None:
     start_va = ctx.rva_to_va(start_rva)
     target_va = ctx.rva_to_va(target_rva)
-    insns = decode_linear(ctx, start_va, 256)
+    insns = decode_linear(ctx, start_va, 0x800)
 
     for i, insn in enumerate(insns):
         if not _is_rel_call_to(insn, target_va):

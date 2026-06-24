@@ -10,7 +10,7 @@ A tool to find offsets in `termsrv.dll` for use with [RDPWrap](https://github.co
 - Handles both x86 and x64 architectures via a unified `ArchStrategy` layer
 - PDB downloads from the Microsoft Symbol Server with retry, resume and magic validation
 - Can be built as standalone console and GUI executables via PyInstaller
-- 55 unit tests covering patch detection, PE image mapping, exception directory parsing and INI normalization
+- 61 unit tests covering patch detection, PE image mapping, exception directory parsing and INI normalization
 - Optional cross-platform GUI (tkinter) for users who prefer not to use the command line
 
 ## Usage
@@ -63,7 +63,7 @@ Requires Python 3.9+ and PyInstaller. The GUI executable embeds Tcl/Tk and can b
 The tool works in two modes:
 
 1. **Symbol-based** (default): Downloads the PDB from the Microsoft Symbol Server (with retry, Range-resume and PDB magic validation) and uses `DbgHelp` to resolve function/variable RVAs by name, then applies instruction-level pattern matching to locate the exact patch site within each function.
-2. **Heuristic** (`--nosymbol`): When no symbols are available, the tool locates C++ class/method name strings in `.rdata`, finds cross-references to them (x64: `LEA [RIP+disp]` / `MOV reg, imm64`; x86: `PUSH imm32` / `MOV reg, imm32`), derives function boundaries (x64: `.pdata` exception directory + unwind chain backtrace; x86: `push ebp; mov ebp, esp` prologue scan), and applies the same instruction-level pattern matching.
+2. **Heuristic** (`--nosymbol`): When no symbols are available, the tool locates C++ class/method name strings in `.rdata`, finds cross-references to them (x64: `LEA [RIP+disp]` / `MOV reg, imm64`; x86: `PUSH imm32` / `MOV reg, imm32` / `MOV [mem], imm32` as fallback), derives function boundaries (x64: `.pdata` exception directory + unwind chain backtrace; x86: `push ebp; mov ebp, esp` prologue scan), and applies the same instruction-level pattern matching.
 
 Both modes extract the same information but may be more or less reliable depending on the availability of symbols and the specific version of `termsrv.dll`.
 
@@ -92,12 +92,12 @@ The `nosymbol` module uses an `ArchStrategy` protocol to isolate the handful of 
 python -m pytest tests/
 ```
 
-55 tests cover:
+61 tests cover:
 
 - `patches.py`: LocalOnly / DefPolicy / SingleUser pattern detection (positive + negative cases, x86 & x64)
 - `pe_image.py`: section mapping, VirtualSize truncation, zero-fill of uninitialized regions
 - `exception_table.py`: `.pdata` parsing, unwind chain backtrace, indirect unwind RVA
-- `nosymbol` xref helpers: `_xref_lea_rip` (x64) and `_xref_imm32_x86` (x86)
+- `nosymbol` xref helpers: `_xref_lea_rip` (x64) and `_xref_imm32_x86` (x86), including `MOV [mem], imm32` pattern
 - `termsrv._normalize_ini_output`: key ordering, SLInit alignment, defaults, garbage resilience
 - `winver.FileVersion`: field decoding, `to_ini_section()` formatting, frozen dataclass
 

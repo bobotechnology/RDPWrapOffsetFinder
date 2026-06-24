@@ -147,6 +147,15 @@ def mov_r32_imm32(reg: int, value: int) -> Instruction:
     return Instruction.create_reg_i32(Code.MOV_R32_IMM32, reg, value)
 
 
+def mov_rm32_imm32(mem: MemoryOperand, value: int) -> Instruction:
+    """MOV dword [mem], imm32 — store immediate into memory.
+
+    Encodes as C7 /0 (e.g. ``mov dword [ebp-10h], 1002F5C0h``).
+    Used by x86 termsrv.dll to store string addresses in local variables.
+    """
+    return Instruction.create_mem_i32(Code.MOV_RM32_IMM32, mem, value)
+
+
 def mov_r64_imm64(reg: int, value: int) -> Instruction:
     return Instruction.create_reg_i64(Code.MOV_R64_IMM64, reg, value)
 

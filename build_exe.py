@@ -25,7 +25,13 @@ def install_pyinstaller() -> None:
 
 
 def clean_old_build() -> None:
-    for p in [ROOT / "build", DIST, ROOT / SPEC_NAME]:
+    for p in [
+        ROOT / "build",
+        ROOT / "build-gui",
+        DIST,
+        ROOT / SPEC_NAME,
+        ROOT / "rdpwrap-offset-finder-gui.spec",
+    ]:
         if p.exists():
             print(f"  removing {p.name}")
             if p.is_dir():

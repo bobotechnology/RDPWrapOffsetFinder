@@ -115,7 +115,16 @@ class X86Strategy:
         return _scan_text_functions_x86(pe, image, image_base)
 
     def scan_function_xrefs(self, image, image_base, pe, targets, log):
-        """x86: scan text functions for PUSH/MOV imm32 references."""
+        """x86: scan text functions for PUSH/MOV imm32 references.
+
+        Two-pass approach:
+        1. Strict pass: PUSH imm32 + MOV reg, imm32 only (precise, no false
+           positives).
+        2. Fallback pass: additionally check MOV [mem], imm32 (needed for
+           some x86 DLLs where string addresses are stored in local vars
+           instead of registers). Skips functions already assigned in pass 1
+           to avoid false positives in large functions.
+        """
         from nosymbol import _scan_text_functions_x86, _xref_imm32_x86
 
         text_funcs = _scan_text_functions_x86(pe, image, image_base)
@@ -125,6 +134,7 @@ class X86Strategy:
         func_sizes: dict[str, int] = {}
         xrefs: dict[str, int | None] = {}
 
+        # Pass 1: strict patterns (PUSH imm32, MOV reg, imm32)
         for begin_rva, end_rva in text_funcs:
             func_len = end_rva - begin_rva
             if func_len <= 0:
@@ -141,6 +151,31 @@ class X86Strategy:
                 _log_append(log, f"xref found: {key} -> function RVA 0x{begin_rva:X} (size 0x{func_len:X})")
             if len(addrs) == len(targets):
                 break
+
+        # Pass 2: fallback to MOV [mem], imm32 for missing targets
+        missing = {k: v for k, v in targets.items() if k not in addrs}
+        if missing:
+            _log_append(log, f"x86 fallback scan (MOV [mem], imm32) for {len(missing)} missing xrefs")
+            assigned_funcs = set(addrs.values())
+            for begin_rva, end_rva in text_funcs:
+                if begin_rva in assigned_funcs:
+                    continue
+                func_len = end_rva - begin_rva
+                if func_len <= 0:
+                    continue
+                for key, target_rva in list(missing.items()):
+                    if key in addrs:
+                        continue
+                    xref = _xref_imm32_x86(image, image_base, begin_rva, func_len, target_rva, allow_mem=True)
+                    if xref is None:
+                        continue
+                    addrs[key] = begin_rva
+                    func_sizes[key] = func_len
+                    xrefs[key] = xref
+                    assigned_funcs.add(begin_rva)
+                    _log_append(log, f"xref found: {key} -> function RVA 0x{begin_rva:X} (size 0x{func_len:X}) (via MOV [mem])")
+                if len(addrs) == len(targets):
+                    break
 
         return addrs, func_sizes, xrefs
 

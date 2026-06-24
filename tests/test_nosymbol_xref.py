@@ -19,6 +19,7 @@ from _asmharness import (
     make_image,
     mov_r32_imm32,
     mov_r64_imm64,
+    mov_rm32_imm32,
     place_code,
     rip_mem,
 )
@@ -101,7 +102,7 @@ class TestXrefImm32X86:
     FUNC = 0x1000
     TARGET = 0x5000
 
-    def _build_and_scan(self, instructions):
+    def _build_and_scan(self, instructions, *, allow_mem=False):
         code = asm(32, instructions, rip=TEST_IMAGE_BASE + self.FUNC)
         img = make_image(0x8000)
         place_code(img, self.FUNC, code)
@@ -111,6 +112,7 @@ class TestXrefImm32X86:
             func_rva=self.FUNC,
             func_len=len(code),
             target_rva=self.TARGET,
+            allow_mem=allow_mem,
         )
 
     def test_push_imm32_matching_target_returns_xref(self):
@@ -144,3 +146,53 @@ class TestXrefImm32X86:
             Instruction.create(Code.NOPD),
         ])
         assert xref is None
+
+    # --- MOV [mem], imm32 pattern (allow_mem=True fallback) ---------------
+
+    def test_mov_mem_imm32_with_allow_mem_returns_xref(self):
+        """MOV dword [ebp-10h], imm32 with allow_mem=True → recognized.
+
+        This is the pattern used by x86 termsrv.dll 10.0.19041.6456 where
+        string addresses are stored in local variables rather than pushed
+        or loaded into registers directly.
+        """
+        mem = MemoryOperand(base=Register.EBP, displ=-0x10)
+        xref = self._build_and_scan([
+            mov_rm32_imm32(mem, TEST_IMAGE_BASE + self.TARGET),
+        ], allow_mem=True)
+        assert xref is not None
+        # MOV r/m32, imm32 with [ebp-10h] = C7 45 F0 + imm32 = 7 bytes.
+        assert xref == self.FUNC + 7
+
+    def test_mov_mem_imm32_without_allow_mem_returns_none(self):
+        """Same instruction with allow_mem=False (default) → not matched.
+
+        This ensures backward compatibility: strict pass does not match
+        MOV [mem], imm32, preventing false positives in large functions.
+        """
+        mem = MemoryOperand(base=Register.EBP, displ=-0x10)
+        xref = self._build_and_scan([
+            mov_rm32_imm32(mem, TEST_IMAGE_BASE + self.TARGET),
+        ], allow_mem=False)
+        assert xref is None
+
+    def test_mov_mem_imm32_wrong_target_returns_none(self):
+        """MOV [mem], imm32 with wrong immediate → not matched even with
+        allow_mem=True."""
+        mem = MemoryOperand(base=Register.EBP, displ=-0x10)
+        xref = self._build_and_scan([
+            mov_rm32_imm32(mem, 0x9999),
+        ], allow_mem=True)
+        assert xref is None
+
+    def test_mov_mem_imm32_after_nop_returns_correct_xref(self):
+        """MOV [mem], imm32 after other instructions → correct next_ip."""
+        mem = MemoryOperand(base=Register.EBP, displ=-0x10)
+        xref = self._build_and_scan([
+            Instruction.create(Code.NOPD),
+            Instruction.create(Code.NOPD),
+            mov_rm32_imm32(mem, TEST_IMAGE_BASE + self.TARGET),
+        ], allow_mem=True)
+        assert xref is not None
+        # 2 NOPs (1B each) + MOV (7B) → next_ip = FUNC + 9.
+        assert xref == self.FUNC + 9

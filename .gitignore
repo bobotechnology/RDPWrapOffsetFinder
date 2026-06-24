@@ -26,6 +26,7 @@ wheels/
 #  Usually these files are written by a pyinstaller GUI
 *.manifest
 *.spec
+build-gui/
 
 # Symbol cache
 .symcache/
