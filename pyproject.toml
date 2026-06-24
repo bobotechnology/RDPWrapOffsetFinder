@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rdpwrap-offset-finder"
-version = "0.1.0"
+version = "0.2.0-pre.1"
 description = "Find offsets for RDPWrap (termsrv.dll) and generate rdpwrap.ini sections"
 readme = "README.md"
 requires-python = ">=3.9"
