@@ -105,6 +105,7 @@ def _fmt_insn(ctx: DisasmContext, insn) -> str:
 # x86 strategy
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class X86Strategy:
     bitness: int = 32
@@ -250,26 +251,33 @@ class X86Strategy:
 
     def scan_slinit_globals(self, image, image_base, csl_init_rva, csl_init_len,
                             str_rvas, keys, log, ctx):
-        """x86 SLInit scan: MOV [abs_addr], EAX + MOV ECX, imm32 (string ptr)."""
+        """x86 SLInit scan: policy-string-driven approach.
+
+        Tracks which policy string (MOV ECX, imm32) was last seen, then
+        assigns the next MOV [abs], REG32 to that variable. This is
+        version-independent and matches the x64 strategy. The fixed-offset
+        cluster approach was removed because the struct layout varies
+        across Windows versions (e.g. 17134 has 0x20-byte block, 17763
+        has a gap making it 0x24 bytes).
+        """
         var_rvas: dict[str, int] = {"bServerSku": 0, "bInitialized": 0}
         for v in keys.values():
             var_rvas[v] = 0
 
+        scan_len = csl_init_len if csl_init_len and csl_init_len > 0 else 0x11000
         current = "bServerSku"
-        scan_len = csl_init_len if csl_init_len > 0 else 0x11000
         start_va = image_base + csl_init_rva
         code = image[csl_init_rva:csl_init_rva + scan_len]
         dec = Decoder(32, code, ip=start_va)
 
         for insn in dec:
-            # bServerSku / policy globals: MOV [abs], EAX
+            # bServerSku / policy globals: MOV [abs], REG32
             if (var_rvas.get(current, 0) == 0
                     and insn.mnemonic == Mnemonic.MOV
                     and insn.op0_kind == OpKind.MEMORY
                     and insn.memory_base == Register.NONE
                     and insn.memory_index == Register.NONE
-                    and insn.op1_kind == OpKind.REGISTER
-                    and insn.op1_register == Register.EAX):
+                    and insn.op1_kind == OpKind.REGISTER):
                 abs_va = insn.memory_displacement
                 if abs_va > image_base:
                     rva = abs_va - image_base
@@ -277,11 +285,15 @@ class X86Strategy:
                     _log_append(log, f"SLInitScan: {current} RVA 0x{rva:X} via {_fmt_insn(ctx, insn)}")
                 continue
 
-            # Policy string selection: MOV ECX, imm32 (string address)
-            if (insn.mnemonic == Mnemonic.MOV
-                    and insn.op0_kind == OpKind.REGISTER
-                    and insn.op0_register == Register.ECX
-                    and insn.op1_kind == OpKind.IMMEDIATE32):
+            # Policy string selection: MOV any_reg, imm32 or PUSH imm32
+            # (absolute address of wide string). Older versions (10586) use
+            # MOV EDX, imm32; newer versions use MOV ECX, imm32.
+            is_mov_reg_imm32 = (insn.mnemonic == Mnemonic.MOV
+                                and insn.op0_kind == OpKind.REGISTER
+                                and insn.op1_kind == OpKind.IMMEDIATE32)
+            is_push_imm32 = (insn.mnemonic == Mnemonic.PUSH
+                             and insn.op0_kind == OpKind.IMMEDIATE32)
+            if is_mov_reg_imm32 or is_push_imm32:
                 imm_va = int(insn.immediate32)
                 imm_rva = imm_va - image_base
                 for s, key in keys.items():

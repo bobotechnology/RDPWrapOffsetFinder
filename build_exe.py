@@ -34,10 +34,13 @@ def clean_old_build() -> None:
     ]:
         if p.exists():
             print(f"  removing {p.name}")
-            if p.is_dir():
-                shutil.rmtree(p)
-            else:
-                p.unlink()
+            try:
+                if p.is_dir():
+                    shutil.rmtree(p)
+                else:
+                    p.unlink()
+            except PermissionError:
+                print(f"  WARNING: could not remove {p.name} (in use), skipping")
 
 
 def build_console_exe() -> None:

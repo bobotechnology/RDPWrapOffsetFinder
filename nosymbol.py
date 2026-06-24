@@ -364,7 +364,7 @@ def _apply_single_user_patch(
             su_func_start = int(addrs["IsSingleSessionPerUser"])
 
     # Attempt 3: exhaustive scan (architecture-specific preferred pattern)
-    if su is None and verify_iat is not None:
+    if su is None:
         su, su_func_start = strat.find_single_user_fallback(
             ctx, pe, mem.image, memset_iat, verify_iat, arch,
         )
