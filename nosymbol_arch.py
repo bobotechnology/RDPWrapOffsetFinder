@@ -265,6 +265,8 @@ class X86Strategy:
             var_rvas[v] = 0
 
         scan_len = csl_init_len if csl_init_len and csl_init_len > 0 else 0x11000
+        if scan_len < 0x1000:
+            scan_len = 0x40000
         current = "bServerSku"
         start_va = image_base + csl_init_rva
         code = image[csl_init_rva:csl_init_rva + scan_len]
@@ -404,29 +406,52 @@ class X64Strategy:
 
     def scan_slinit_globals(self, image, image_base, csl_init_rva, csl_init_len,
                             str_rvas, keys, log, ctx):
-        """x64 SLInit scan: MOV [RIP+disp], EAX + LEA RCX, [RIP+disp] (string ptr)."""
+        """x64 SLInit scan: policy-string-driven approach.
+
+        Tracks which policy string (LEA RCX, [RIP+disp]) was last seen, then
+        assigns the next MOV [RIP+disp], REG32 to that variable. Accepts any
+        32-bit register (not just EAX) for compatibility with older versions
+        that use R14D or ECX. bInitialized is detected via immediate-1 write
+        or via a register that was recently loaded with 1.
+        """
         var_rvas: dict[str, int] = {"bServerSku": 0, "bInitialized": 0}
         for v in keys.values():
             var_rvas[v] = 0
 
         current = "bServerSku"
         scan_len = csl_init_len if csl_init_len and csl_init_len > 0 else 0x11000
+        # Some old DLLs (e.g. 10240 x64) have very small exception dir entries
+        # (only covering the prologue) while the actual function is ~225KB.
+        # Only override to a large scan for suspiciously small sizes.
+        if scan_len < 0x1000:
+            scan_len = 0x40000
         start_va = image_base + csl_init_rva
         code = image[csl_init_rva:csl_init_rva + scan_len]
         dec = Decoder(64, code, ip=start_va)
 
+        # Track register immediate values for bInitialized detection.
+        # Cleared after each policy global write so only the most recent
+        # MOV reg, 1 (after all policy globals are assigned) triggers.
+        reg_imm: dict[int, int] = {}
+
         for insn in dec:
-            # bServerSku / policy globals: MOV [RIP+disp], EAX
+            # Track MOV reg, imm (for bInitialized via register)
+            if (insn.mnemonic == Mnemonic.MOV
+                    and insn.op0_kind == OpKind.REGISTER
+                    and insn.op1_kind in (OpKind.IMMEDIATE8, OpKind.IMMEDIATE32)):
+                imm = insn.immediate8 if insn.op1_kind == OpKind.IMMEDIATE8 else insn.immediate32
+                reg_imm[insn.op0_register] = imm
+
+            # bServerSku / policy globals: MOV [RIP+disp], REG32 (any register)
             if (var_rvas.get(current, 0) == 0
                     and insn.mnemonic == Mnemonic.MOV
                     and insn.op0_kind == OpKind.MEMORY
                     and insn.memory_base == Register.RIP
-                    and insn.op1_kind == OpKind.REGISTER
-                    and insn.op1_register == Register.EAX):
+                    and insn.op1_kind == OpKind.REGISTER):
                 if insn.is_ip_rel_memory_operand:
                     var_rvas[current] = int(insn.ip_rel_memory_address - image_base)
                     _log_append(log, f"SLInitScan: {current} RVA 0x{var_rvas[current]:X} via {_fmt_insn(ctx, insn)}")
-                continue
+                    reg_imm.clear()  # reset so only later MOV reg,1 triggers bInitialized
 
             # Policy string selection: LEA RCX, [RIP+disp]
             if (insn.mnemonic == Mnemonic.LEA
@@ -445,16 +470,19 @@ class X64Strategy:
                         break
                 continue
 
-            # bInitialized: MOV [RIP+disp], 1
+            # bInitialized: MOV [RIP+disp], 1 (immediate) or MOV [RIP+disp], REG where REG==1
             if (insn.mnemonic == Mnemonic.MOV
                     and insn.op0_kind == OpKind.MEMORY
                     and insn.memory_base == Register.RIP
-                    and insn.op1_kind in (OpKind.IMMEDIATE8, OpKind.IMMEDIATE32)
-                    and (insn.immediate8 == 1 if insn.op1_kind == OpKind.IMMEDIATE8 else insn.immediate32 == 1)):
-                if insn.is_ip_rel_memory_operand:
+                    and insn.is_ip_rel_memory_operand):
+                is_imm_1 = (insn.op1_kind in (OpKind.IMMEDIATE8, OpKind.IMMEDIATE32)
+                            and (insn.immediate8 if insn.op1_kind == OpKind.IMMEDIATE8 else insn.immediate32) == 1)
+                is_reg_1 = (insn.op1_kind == OpKind.REGISTER
+                            and reg_imm.get(insn.op1_register, -1) == 1)
+                if is_imm_1 or is_reg_1:
                     var_rvas["bInitialized"] = int(insn.ip_rel_memory_address - image_base)
                     _log_append(log, f"SLInitScan: bInitialized RVA 0x{var_rvas['bInitialized']:X} via {_fmt_insn(ctx, insn)}")
-                break
+                    break
 
         return var_rvas
 

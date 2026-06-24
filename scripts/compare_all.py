@@ -291,6 +291,7 @@ def main():
         test_dir = args.dir
     else:
         candidates = [
+            'C:/Users/bobot.DESKTOP-H2S0A0K/Documents/BaiduNetdiskWorkspace/termsrv_tests',
             os.path.expanduser('~/Downloads/termsrv_tests'),
             'C:/Users/bobot.DESKTOP-H2S0A0K/Downloads/termsrv_tests',
         ]
