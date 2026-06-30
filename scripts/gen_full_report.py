@@ -1,0 +1,632 @@
+#!/usr/bin/env python3
+"""Generate a comprehensive HTML report from compare_report.csv.
+
+Shows ALL DLLs (both OK and DIFF) with filtering, summary stats, and
+expandable diff details.
+
+Usage:
+    python scripts/gen_full_report.py [--input CSV] [--output HTML]
+"""
+
+import argparse
+import csv
+from collections import defaultdict
+from json import dumps as json_dumps
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+# ── helpers ────────────────────────────────────────────────────────────
+
+def _parse_version(v: str) -> tuple[int, ...]:
+    try:
+        return tuple(int(x) for x in v.split('.'))
+    except (ValueError, AttributeError):
+        return (0,)
+
+
+def _version_family(v: str) -> str:
+    """e.g. 10.0.19041 → '19041 (20H1/21H1/21H2)'"""
+    parts = _parse_version(v)
+    if parts[:2] == (10, 0):
+        build = parts[2]
+        names = {
+            10240: '10240 (1507)',
+            10586: '10586 (1511)',
+            14393: '14393 (1607)',
+            17063: '17063 (RS3 Insider)',
+            17134: '17134 (1803)',
+            17763: '17763 (1809)',
+            18362: '18362 (1903)',
+            19041: '19041 (2004/20H2/21H1/21H2)',
+            20348: '20348 (Server 2022)',
+            22000: '22000 (21H2)',
+            22621: '22621 (22H2/23H2)',
+            26100: '26100 (24H2)',
+            28000: '28000 (25H2 Insider)',
+        }
+        label = names.get(build, f'{build}')
+        return label
+    if parts[:1] == (6,):
+        if parts[1] == 1:
+            return '7601 (Win7 SP1)'
+        elif parts[1] == 2:
+            return f'{parts[2]} (Win8)'
+        elif parts[1] == 3:
+            return '9600 (Win8.1)'
+    return v
+
+
+def _arch_icon(arch: str) -> str:
+    return 'x64' if arch == 'x64' else 'x86'
+
+
+def classify_diff(sym_val: str, nosym_val: str) -> str:
+    s = (sym_val or '').strip()
+    n = (nosym_val or '').strip()
+    if not s and n:
+        return 'sym_empty'
+    if s and not n:
+        return 'nosym_empty'
+    if not s and not n:
+        return 'both_empty'
+    return 'value_mismatch'
+
+
+CAT_LABELS = {
+    'sym_empty':    'symbol 空',
+    'nosym_empty':  'nosym 空',
+    'both_empty':   '双方都空',
+    'value_mismatch': '值不同',
+}
+
+CAT_COLORS = {
+    'sym_empty':     '#FCEBEB',
+    'nosym_empty':   '#E6F1FB',
+    'both_empty':    '#F1EFE8',
+    'value_mismatch':'#FAEEDA',
+}
+
+
+def load_csv(path: str) -> list[dict]:
+    rows = []
+    with open(path, 'r', encoding='utf-8-sig', newline='') as f:
+        for r in csv.DictReader(f):
+            rows.append(r)
+    return rows
+
+
+def build_data(rows: list[dict]) -> dict:
+    """Return structured data for HTML rendering."""
+    dlls: dict[str, dict] = {}
+
+    for r in rows:
+        dll = r['DLL']
+        if dll not in dlls:
+            dlls[dll] = {
+                'dll': dll,
+                'version': r['Version'],
+                'arch': r['Arch'],
+                'status': r['Status'],
+                'diffs': [],
+            }
+        if r['Status'] == 'DIFF':
+            cat = classify_diff(r['Symbol'], r['Nosymbol'])
+            dlls[dll]['diffs'].append({
+                'section': r['Section'],
+                'key': r['Key'],
+                'symbol': r['Symbol'],
+                'nosymbol': r['Nosymbol'],
+                'kind': r.get('Kind', ''),
+                'cat': cat,
+            })
+
+    # Sort DLLs by version + arch
+    entries = sorted(
+        dlls.values(),
+        key=lambda e: (_parse_version(e['version']), e['arch']),
+    )
+
+    ok_count = sum(1 for e in entries if e['status'] == 'OK')
+    diff_count = sum(1 for e in entries if e['status'] == 'DIFF')
+    nopdb_count = sum(1 for e in entries if e['status'] == 'NOPDB')
+    total = len(entries)
+
+    # Group by version family
+    families: dict[str, list[dict]] = defaultdict(list)
+    for e in entries:
+        families[_version_family(e['version'])].append(e)
+
+    return {
+        'entries': entries,
+        'families': families,
+        'total': total,
+        'ok': ok_count,
+        'diff': diff_count,
+        'nopdb': nopdb_count,
+    }
+
+
+# ── HTML template ──────────────────────────────────────────────────────
+
+CSS = '''
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px; line-height:1.6; color:#1a1a1a; background:#fafafa;
+  padding: 24px;
+}
+h1 { font-size:20px; font-weight:600; margin-bottom:4px; }
+.subtitle { color:#888; font-size:13px; margin-bottom:20px; }
+
+/* ── summary cards ── */
+.summary { display:flex; gap:16px; margin-bottom:24px; flex-wrap:wrap; }
+.card {
+  background:#fff; border-radius:10px; padding:16px 24px;
+  border:1px solid #e8e8e8; min-width:100px; text-align:center;
+}
+.card .value { font-size:28px; font-weight:700; }
+.card .label { font-size:12px; color:#666; margin-top:2px; }
+.card.ok .value { color:#0F6E56; }
+.card.diff .value { color:#D85A30; }
+.card.nopdb .value { color:#8B6F47; }
+.card.total .value { color:#333; }
+.card.pct .value { color:#555; }
+
+/* ── filter row ── */
+.filter-row { display:flex; gap:12px; align-items:center; margin-bottom:16px; flex-wrap:wrap; }
+.filter-row input, .filter-row select {
+  padding:6px 12px; border:1px solid #ccc; border-radius:6px; font-size:13px;
+}
+.filter-row input { width:200px; }
+.stats-badge { font-size:12px; color:#888; margin-left:8px; }
+
+/* ── legend ── */
+.legend { display:flex; gap:12px; margin-bottom:16px; flex-wrap:wrap; font-size:12px; }
+.legend-item { display:flex; align-items:center; gap:6px;
+  padding:4px 10px; border-radius:5px; }
+
+/* ── family block ── */
+.family-header {
+  background:#eee; padding:8px 14px; border-radius:6px 6px 0 0;
+  margin-top:20px; font-weight:600; font-size:14px;
+  cursor:pointer; user-select:none;
+  display:flex; justify-content:space-between; align-items:center;
+}
+.family-header .toggle { font-size:12px; color:#888; }
+.family-body { border:1px solid #e8e8e8; border-top:none; border-radius:0 0 6px 6px; }
+.family-body table { width:100%; border-collapse:collapse; }
+.family-body td, .family-body th {
+  padding:7px 12px; border-bottom:1px solid #f0f0f0; font-size:13px; vertical-align:middle;
+}
+.family-body th {
+  background:#f8f8f8; text-align:left; font-weight:600; cursor:pointer;
+}
+.family-body tr:last-child td { border-bottom:none; }
+.family-body tbody tr:hover { background:#f4f8ff; }
+
+/* ── status pill ── */
+.pill {
+  display:inline-block; padding:2px 10px; border-radius:99px;
+  font-size:11px; font-weight:600; text-transform:uppercase;
+}
+.pill.ok { background:#d4f0e8; color:#0a5c41; }
+.pill.diff { background:#fde6d8; color:#c24c1f; }
+.pill.nopdb { background:#f0ebe0; color:#6b4f2a; }
+
+.mono { font-family:"SF Mono",Consolas,"Liberation Mono",monospace; font-size:12px; }
+.empty { color:#ccc; font-style:italic; }
+
+/* ── details row ── */
+.details-row { display:none; }
+.details-row.open { display:table-row; }
+.details-cell { padding:0 12px 8px 12px; }
+.details-table { width:100%; border-collapse:collapse; font-size:12px; margin-top:4px; }
+.details-table th {
+  background:#eef; padding:4px 8px; text-align:left; font-weight:600; font-size:11px;
+  border-bottom:1px solid #ddd;
+}
+.details-table td { padding:3px 8px; border-bottom:1px solid #f4f4f4; }
+.details-table .cat-badge {
+  display:inline-block; padding:1px 6px; border-radius:3px; font-size:10px; font-weight:600;
+}
+.row-clickable { cursor:pointer; }
+.row-clickable:hover { background:#f0f4ff !important; }
+
+/* ── tabs ── */
+.tabs { display:flex; gap:0; margin-bottom:0; }
+.tab {
+  padding:8px 20px; border:1px solid #e0e0e0; border-radius:8px 8px 0 0;
+  background:#f5f5f5; cursor:pointer; font-size:13px; font-weight:500;
+  margin-right:-1px; user-select:none;
+}
+.tab.active { background:#fff; border-bottom-color:#fff; font-weight:600; }
+.tab-content { display:none; border:1px solid #e0e0e0; border-radius:0 6px 6px 6px;
+  padding:16px; background:#fff; }
+.tab-content.active { display:block; }
+
+.section-tag {
+  display:inline-block; padding:1px 6px; border-radius:3px;
+  font-size:10px; font-weight:600; margin-right:4px;
+}
+.section-tag.main { background:#d4e4f7; color:#185FA5; }
+.section-tag.slinit { background:#e1f5ee; color:#0F6E56; }
+'''
+
+
+JS = '''
+<script>
+function toggleFamily(id) {
+  const body = document.getElementById('fbody-' + id);
+  const icon = document.getElementById('ficon-' + id);
+  if (body.style.display === 'none') {
+    body.style.display = 'block';
+    if(icon) icon.textContent = '▾';
+  } else {
+    body.style.display = 'none';
+    if(icon) icon.textContent = '▸';
+  }
+}
+
+function toggleDiffs(rowId) {
+  const row = document.getElementById(rowId);
+  if (row) row.classList.toggle('open');
+}
+
+function filterDLLs() {
+  const q = (document.getElementById('filter-input').value || '').toLowerCase();
+  const f = document.getElementById('filter-family').value;
+  const bodies = document.querySelectorAll('.family-body');
+  bodies.forEach(b => {
+    let anyVisible = false;
+    const rows = b.querySelectorAll('tbody tr:not(.details-row)');
+    rows.forEach(r => {
+      const txt = (r.dataset.filter || '').toLowerCase();
+      const fam = (r.dataset.family || '');
+      const show = (!q || txt.includes(q)) && (!f || fam === f);
+      r.style.display = show ? '' : 'none';
+      // hide sibling details row too
+      const dr = r.nextElementSibling;
+      if (dr && dr.classList.contains('details-row')) dr.classList.remove('open');
+      if (show) anyVisible = true;
+    });
+    b.parentElement.style.display = anyVisible ? '' : 'none';
+    const hdr = b.previousElementSibling;
+    if (hdr && hdr.classList.contains('family-header')) {
+      hdr.style.display = anyVisible ? '' : 'none';
+    }
+  });
+  updateCount();
+}
+
+function showAll() {
+  document.getElementById('filter-input').value = '';
+  document.getElementById('filter-family').value = '';
+  document.querySelectorAll('.family-body').forEach(b => { b.style.display = 'block'; });
+  document.querySelectorAll('.family-header').forEach(h => { h.style.display = ''; });
+  document.querySelectorAll('.family-body tbody tr').forEach(r => { r.style.display = ''; });
+  document.querySelectorAll('.details-row').forEach(r => { r.classList.remove('open'); });
+  document.querySelectorAll('.family-header .toggle').forEach(i => { i.textContent = '▾'; });
+  updateCount();
+}
+
+function showDiffs() {
+  document.querySelectorAll('.family-body tbody tr:not(.details-row)').forEach(r => {
+    const isDiff = r.dataset.status === 'DIFF';
+    r.style.display = isDiff ? '' : 'none';
+    const dr = r.nextElementSibling;
+    if (dr && dr.classList.contains('details-row')) dr.classList.remove('open');
+  });
+  document.querySelectorAll('.family-body').forEach(b => {
+    let anyVisible = false;
+    b.querySelectorAll('tbody tr:not(.details-row)').forEach(r => {
+      if (r.style.display !== 'none') anyVisible = true;
+    });
+    b.style.display = anyVisible ? 'block' : 'none';
+    const hdr = b.previousElementSibling;
+    if (hdr && hdr.classList.contains('family-header')) {
+      hdr.style.display = anyVisible ? '' : 'none';
+    }
+  });
+  updateCount();
+}
+
+function updateCount() {
+  let total = 0, ok = 0, diff = 0, nopdb = 0;
+  document.querySelectorAll('.family-body tbody tr:not(.details-row)').forEach(r => {
+    if (r.style.display === 'none') return;
+    total++;
+    if (r.dataset.status === 'OK') ok++;
+    else if (r.dataset.status === 'NOPDB') nopdb++;
+    else diff++;
+  });
+  document.getElementById('cnt-total').textContent = total;
+  document.getElementById('cnt-ok').textContent = ok;
+  document.getElementById('cnt-diff').textContent = diff;
+  document.getElementById('cnt-nopdb').textContent = nopdb;
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  document.getElementById('panel-' + name).classList.add('active');
+}
+</script>
+'''
+
+
+def render(jsondata: str) -> str:
+    # We render entirely via Python f-strings with JSON embedded in JS.
+    # The template approach keeps the script simple and self-contained.
+    return f'''<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Symbol vs Nosymbol — Full Comparison Report</title>
+<style>{CSS}</style>
+</head>
+<body>
+
+<h1>Symbol vs Nosymbol 全量对比报告</h1>
+<p class="subtitle" id="summary-line">加载中…</p>
+
+<div class="tabs">
+  <div class="tab active" id="tab-list" onclick="switchTab('list')">DLL 列表</div>
+  <div class="tab" id="tab-diffs" onclick="switchTab('diffs')">差异详情</div>
+</div>
+
+<!-- ── Tab 1: DLL list ── -->
+<div class="tab-content active" id="panel-list">
+  <div class="filter-row">
+    <input id="filter-input" type="text" placeholder="搜索 (文件名/版本/架构)..." oninput="filterDLLs()">
+    <select id="filter-family" onchange="filterDLLs()">
+      <option value="">所有版本家族</option>
+      <option value="28000">28000 (25H2 Insider)</option>
+      <option value="26100">26100 (24H2)</option>
+      <option value="22621">22621 (22H2/23H2)</option>
+      <option value="22000">22000 (21H2)</option>
+      <option value="20348">20348 (Server 2022)</option>
+      <option value="19041">19041 (2004/20H2/21H1/21H2)</option>
+      <option value="18362">18362 (1903)</option>
+      <option value="17763">17763 (1809)</option>
+      <option value="17134">17134 (1803)</option>
+      <option value="17063">17063 (RS3 Insider)</option>
+      <option value="14393">14393 (1607)</option>
+      <option value="10586">10586 (1511)</option>
+      <option value="10240">10240 (1507)</option>
+      <option value="9600">9600 (Win8.1)</option>
+      <option value="9200">9200 (Win8)</option>
+      <option value="8250">8250 (Win8 Dev)</option>
+      <option value="7601">7601 (Win7 SP1)</option>
+    </select>
+    <button onclick="showAll()" style="padding:6px 14px;border:1px solid #aaa;border-radius:6px;cursor:pointer;background:#fff;">全部显示</button>
+    <button onclick="showDiffs()" style="padding:6px 14px;border:1px solid #aaa;border-radius:6px;cursor:pointer;background:#fff;">仅差异</button>
+    <span class="stats-badge">
+      显示 <strong id="cnt-total">-</strong> 个 DLL
+      (<span style="color:#0F6E56;">OK <strong id="cnt-ok">-</strong></span>
+      / <span style="color:#D85A30;">DIFF <strong id="cnt-diff">-</strong></span>
+      / <span style="color:#8B6F47;">NOPDB <strong id="cnt-nopdb">-</strong></span>)
+    </span>
+  </div>
+
+  <div id="dll-list"></div>
+</div>
+
+<!-- ── Tab 2: Diff summary ── -->
+<div class="tab-content" id="panel-diffs">
+  <div id="diff-detail"></div>
+</div>
+
+{JS}
+
+<script>
+const DATA = {jsondata};
+
+// ── render DLL list ──
+function fmtArch(a) {{ return a === 'x64' ? '64-bit' : '32-bit'; }}
+function renderDllList() {{
+  const families = DATA.families;
+  const keys = Object.keys(families);
+  // Pre-defined order
+  const order = ['28000 (25H2 Insider)','26100 (24H2)','22621 (22H2/23H2)','22000 (21H2)',
+    '20348 (Server 2022)','19041 (2004/20H2/21H1/21H2)','18362 (1903)','17763 (1809)',
+    '17134 (1803)','17063 (RS3 Insider)','14393 (1607)','10586 (1511)','10240 (1507)',
+    '9600 (Win8.1)','9200 (Win8)','8250 (Win8 Dev)','7601 (Win7 SP1)'];
+  const usedOrder = order.filter(k => families[k]);
+
+  let html = '';
+  usedOrder.forEach(key => {{
+    const group = families[key];
+    const okCount = group.filter(e => e.status === 'OK').length;
+    const diffCount = group.filter(e => e.status === 'DIFF').length;
+    const fid = 'f' + key.replace(/[^a-zA-Z0-9]/g, '_');
+    html += '<div class="family-header" onclick="toggleFamily(\\'' + fid + '\\')">';
+    html += '<span>' + key + ' &nbsp;<span style="font-weight:400;color:#666;font-size:12px;">'
+      + group.length + ' DLL</span></span>';
+    html += '<span class="toggle" id="ficon-' + fid + '">▾</span></div>';
+    html += '<div class="family-body" id="fbody-' + fid + '"><table>';
+    html += '<thead><tr><th>DLL</th><th>架构</th><th>版本号</th><th>状态</th><th>差异数</th></tr></thead><tbody>';
+    group.forEach(e => {{
+      const dllName = e.dll.replace('.dll', '');
+      const nDiffs = e.diffs.length;
+      const rowId = 'r-' + dllName.replace(/[. ]/g, '_');
+      const statusCls = e.status === 'OK' ? 'ok' : (e.status === 'NOPDB' ? 'nopdb' : 'diff');
+      const statusLabel = e.status === 'NOPDB' ? 'NOPDB' : e.status;
+      html += '<tr class="row-clickable" data-filter="' + dllName + ' ' + e.version + ' ' + e.arch
+        + '" data-family="' + key + '" data-status="' + e.status + '"'
+        + (nDiffs ? ' onclick="toggleDiffs(\\'dr-' + rowId + '\\')"' : '')
+        + '>';
+      html += '<td style="font-family:monospace;font-size:12px;">'
+        + (nDiffs ? '<span style="cursor:pointer;margin-right:4px;">▶</span>' : '<span style="visibility:hidden;margin-right:4px;">▶</span>')
+        + dllName + '</td>';
+      html += '<td>' + fmtArch(e.arch) + '</td>';
+      html += '<td class="mono">' + e.version + '</td>';
+      html += '<td><span class="pill ' + statusCls + '">' + statusLabel + '</span></td>';
+      html += '<td>' + (nDiffs > 0 ? '<strong style="color:#D85A30;">' + nDiffs + '</strong>' : '—') + '</td>';
+      html += '</tr>';
+      if (nDiffs > 0) {{
+        html += '<tr class="details-row" id="dr-' + rowId + '"><td colspan="5" class="details-cell">';
+        html += '<table class="details-table"><thead><tr>';
+        html += '<th>Section</th><th>Key</th><th>Symbol</th><th>Nosymbol</th><th>类型</th></tr></thead><tbody>';
+        e.diffs.forEach(d => {{
+          const secTag = d.section.includes('-SLInit') ? 'SLInit' : 'Main';
+          const secCls = d.section.includes('-SLInit') ? 'slinit' : 'main';
+          const catBg = DATA.catColors[d.cat] || '#fff';
+          const catLabel = DATA.catLabels[d.cat] || d.cat;
+          html += '<tr>';
+          html += '<td><span class="section-tag ' + secCls + '">' + secTag + '</span></td>';
+          html += '<td class="mono">' + d.key + '</td>';
+          html += '<td class="mono">' + (d.symbol || '<span class="empty">(empty)</span>') + '</td>';
+          html += '<td class="mono">' + (d.nosymbol || '<span class="empty">(empty)</span>') + '</td>';
+          html += '<td><span class="cat-badge" style="background:' + catBg + ';">' + catLabel + '</span></td>';
+          html += '</tr>';
+        }});
+        html += '</tbody></table></td></tr>';
+      }}
+    }});
+    html += '</tbody></table></div>';
+  }});
+  document.getElementById('dll-list').innerHTML = html;
+  updateCount();
+}}
+
+// ── render diff detail ──
+function renderDiffDetail() {{
+  const entries = DATA.entries.filter(e => e.status === 'DIFF');
+  const nopdb = DATA.entries.filter(e => e.status === 'NOPDB');
+  let html = '';
+  if (entries.length === 0 && nopdb.length === 0) {{
+    html = '<p style="color:#0F6E56;font-size:14px;padding:12px;">🎉 所有 DLL 的 symbol 与 nosymbol 模式输出完全一致！</p>';
+  }} else {{
+    html += '<div class="legend">';
+    Object.entries(DATA.catLabels).forEach(([cat, label]) => {{
+      html += '<div class="legend-item" style="background:' + (DATA.catColors[cat] || '#fff') + ';">'
+        + label + '</div>';
+    }});
+    html += '</div>';
+
+    entries.forEach(e => {{
+      const dllName = e.dll.replace('.dll', '');
+      const nMain = e.diffs.filter(d => !d.section.includes('-SLInit')).length;
+      const nSL = e.diffs.length - nMain;
+      html += '<h2 style="margin-top:20px;font-size:15px;">' + dllName
+        + ' <span style="font-weight:400;color:#666;font-size:13px;">'
+        + '(' + e.version + ', ' + e.arch + ') &mdash; main:' + nMain + ', SLInit:' + nSL + '</span></h2>';
+      html += '<table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #e0e0e0;border-radius:6px;">';
+      html += '<thead><tr><th>Section</th><th>Key</th><th>Symbol</th><th>Nosymbol</th><th>类型</th></tr></thead><tbody>';
+      e.diffs.forEach(d => {{
+        const secTag = d.section.includes('-SLInit') ? 'SLInit' : 'Main';
+        const secCls = d.section.includes('-SLInit') ? 'slinit' : 'main';
+        const catBg = DATA.catColors[d.cat] || '#fff';
+        const catLabel = DATA.catLabels[d.cat] || d.cat;
+        html += '<tr>';
+        html += '<td><span class="section-tag ' + secCls + '">' + secTag + '</span></td>';
+        html += '<td class="mono">' + d.key + '</td>';
+        html += '<td class="mono">' + (d.symbol || '<span class="empty">(empty)</span>') + '</td>';
+        html += '<td class="mono">' + (d.nosymbol || '<span class="empty">(empty)</span>') + '</td>';
+        html += '<td><span class="cat-badge" style="background:' + catBg + ';">' + catLabel + '</span></td>';
+        html += '</tr>';
+      }});
+      html += '</tbody></table>';
+    }});
+    html += '<h2 style="margin-top:24px;font-size:15px;">差异统计</h2>';
+    html += '<table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #e0e0e0;border-radius:6px;">';
+    html += '<thead><tr><th>类型</th><th>数量</th><th>说明</th></tr></thead><tbody>';
+    const stats = {{}};
+    entries.forEach(e => e.diffs.forEach(d => {{
+      stats[d.cat] = (stats[d.cat] || 0) + 1;
+    }}));
+    Object.entries(DATA.catLabels).forEach(([cat, label]) => {{
+      if (stats[cat]) {{
+        html += '<tr><td><span class="cat-badge" style="background:' + (DATA.catColors[cat] || '#fff') + ';">'
+          + label + '</span></td><td><strong>' + stats[cat] + '</strong></td><td>';
+        if (cat === 'nosym_empty') html += 'nosymbol 模式未能找到某些偏移（老版本 x86 或 SLInit 全局变量）';
+        else if (cat === 'value_mismatch') html += 'symbol 与 nosymbol 返回了不同的值（老版本 DefPolicy/SingleUser 模式差异）';
+        else if (cat === 'sym_empty') html += '无 PDB 符号可对比（nosymbol 依然能找到偏移）';
+        else html += '双方均无法定位';
+        html += '</td></tr>';
+      }}
+    }});
+    html += '</tbody></table>';
+  }}
+
+  // Show no-PDB entries
+  if (nopdb.length > 0) {{
+    html += '<h2 style="margin-top:24px;font-size:15px;color:#8B6F47;">📭 无 PDB 参考 (nosym-only)</h2>';
+    html += '<p style="color:#666;font-size:13px;margin-bottom:12px;">以下 DLL 缺少 PDB 符号，仅展示 nosymbol 模式的分析结果（无对照）。</p>';
+    html += '<table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #e0e0e0;border-radius:6px;">';
+    html += '<thead><tr><th>DLL</th><th>版本</th><th>架构</th></tr></thead><tbody>';
+    nopdb.forEach(e => {{
+      html += '<tr><td class="mono">' + e.dll.replace('.dll','') + '</td>';
+      html += '<td class="mono">' + e.version + '</td>';
+      html += '<td>' + (e.arch === 'x64' ? '64-bit' : '32-bit') + '</td></tr>';
+    }});
+    html += '</tbody></table>';
+  }}
+  document.getElementById('diff-detail').innerHTML = html;
+}}
+
+// init
+document.getElementById('summary-line').textContent =
+  DATA.total + ' DLL tested | ' + DATA.ok + ' OK (' + Math.round(DATA.ok/(DATA.total - DATA.nopdb)*100)
+  + '%) | ' + DATA.diff + ' DIFF | ' + DATA.nopdb + ' NOPDB';
+renderDllList();
+renderDiffDetail();
+</script>
+</body>
+</html>'''
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Generate full HTML comparison report')
+    parser.add_argument('--input', '-i',
+                        default=str(PROJECT_ROOT / 'scripts' / 'compare_report.csv'),
+                        help='Input CSV path')
+    parser.add_argument('--output', '-o',
+                        default=str(PROJECT_ROOT / 'scripts' / 'full_report.html'),
+                        help='Output HTML path')
+    args = parser.parse_args()
+
+    rows = load_csv(args.input)
+    data = build_data(rows)
+
+    # Prepare JSON-safe data for embedding in the page
+    jsondata = json_dumps({
+        'families': {
+            k: [{
+                'dll': e['dll'],
+                'version': e['version'],
+                'arch': e['arch'],
+                'status': e['status'],
+                'diffs': e['diffs'],
+            } for e in v]
+            for k, v in data['families'].items()
+        },
+        'entries': [{
+            'dll': e['dll'],
+            'version': e['version'],
+            'arch': e['arch'],
+            'status': e['status'],
+            'diffs': e['diffs'],
+        } for e in data['entries']],
+        'total': data['total'],
+        'ok': data['ok'],
+        'diff': data['diff'],
+        'nopdb': data['nopdb'],
+        'catLabels': CAT_LABELS,
+        'catColors': CAT_COLORS,
+    }, ensure_ascii=False)
+
+    html = render(jsondata)
+    out = Path(args.output)
+    out.write_text(html, encoding='utf-8')
+
+    print(f"Report generated: {out}")
+    print(f"  Total: {data['total']} | OK: {data['ok']} | DIFF: {data['diff']} | NOPDB: {data['nopdb']}")
+
+
+if __name__ == '__main__':
+    main()

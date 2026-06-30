@@ -116,20 +116,31 @@ def _extract_version_arch(raw: str) -> tuple[str, str]:
     return version, arch
 
 
+def _is_no_pdb(dll_path: str) -> bool:
+    """DLL under a 'nosym' (or similar) directory has no PDB reference."""
+    lower = dll_path.lower().replace('\\', '/')
+    return '/nosym/' in lower or '/no pdb/' in lower
+
+
 def analyze_one(dll_path: str) -> CompareResult:
     """Run both symbol and nosymbol analysis on one DLL."""
     r = CompareResult(path=dll_path)
+    no_pdb = _is_no_pdb(dll_path)
 
-    # Symbol mode
-    t0 = time.perf_counter()
-    try:
-        r.sym_raw = analyze_termsrv(dll_path, use_symbols=True)
-        r.success = True
-    except Exception as e:
-        r.error = f"symbol: {e}"
+    # Symbol mode — skip if we know there's no PDB
+    if no_pdb:
+        r.sym_raw = ''
+        r.sym_time = 0.0
+    else:
+        t0 = time.perf_counter()
+        try:
+            r.sym_raw = analyze_termsrv(dll_path, use_symbols=True)
+            r.success = True
+        except Exception as e:
+            r.error = f"symbol: {e}"
+            r.sym_time = time.perf_counter() - t0
+            return r
         r.sym_time = time.perf_counter() - t0
-        return r
-    r.sym_time = time.perf_counter() - t0
 
     # Nosymbol mode
     t0 = time.perf_counter()
@@ -137,13 +148,19 @@ def analyze_one(dll_path: str) -> CompareResult:
         r.nosym_raw = analyze_termsrv(dll_path, use_symbols=False)
     except Exception as e:
         r.error = f"nosymbol: {e}"
+        # set version even on nosym failure so the entry shows up
+        r.version, r.arch = _extract_version_arch('')
         r.nosym_time = time.perf_counter() - t0
         return r
     r.nosym_time = time.perf_counter() - t0
 
-    r.version, r.arch = _extract_version_arch(r.sym_raw)
+    r.version, r.arch = _extract_version_arch(r.sym_raw or r.nosym_raw)
 
-    # Parse and compare
+    # Parse and compare — for no-PDB DLLs there is nothing to compare
+    if no_pdb:
+        r.success = True
+        return r
+
     try:
         sym_parsed = parse_ini_output(r.sym_raw)
         nosym_parsed = parse_ini_output(r.nosym_raw)
@@ -159,12 +176,13 @@ def analyze_one(dll_path: str) -> CompareResult:
 def print_summary(results: list[CompareResult]):
     """Print a compact summary table."""
     total = len(results)
-    ok = sum(1 for r in results if r.success and not r.diffs)
+    ok = sum(1 for r in results if r.success and not r.diffs and not _is_no_pdb(r.path))
+    no_pdb = sum(1 for r in results if r.success and _is_no_pdb(r.path))
     diff = sum(1 for r in results if r.success and r.diffs)
-    fail = total - ok - diff
+    fail = total - ok - diff - no_pdb
 
     print(f"\n{'='*90}")
-    print(f"Total: {total}  |  OK: {ok}  |  DIFF: {diff}  |  FAIL: {fail}")
+    print(f"Total: {total}  |  OK: {ok}  |  DIFF: {diff}  |  NOPDB: {no_pdb}  |  FAIL: {fail}")
     print(f"{'='*90}")
 
     if fail:
@@ -177,12 +195,12 @@ def print_summary(results: list[CompareResult]):
 
 def print_diffs(results: list[CompareResult], verbose: bool = False):
     """Print detailed diffs for each DLL with discrepancies."""
-    if not any(r.diffs for r in results):
+    if not any(r.diffs for r in results if not _is_no_pdb(r.path)):
         print("\n✅ All symbol/nosymbol results match!")
         return
 
     for r in results:
-        if not r.diffs:
+        if not r.diffs or _is_no_pdb(r.path):
             continue
         name = os.path.basename(r.path)
         main_diffs = [d for d in r.diffs if '-SLInit' not in d['section']]
@@ -214,6 +232,12 @@ def print_slinit_summary(results: list[CompareResult]):
         if not r.success:
             continue
         name = os.path.basename(r.path)
+        if _is_no_pdb(r.path):
+            nosym_parsed = parse_ini_output(r.nosym_raw)
+            nosym_slinit = next((v for k, v in nosym_parsed.items() if k.endswith('-SLInit')), {})
+            nc = len(nosym_slinit)
+            print(f"{name:<50} {nc:>3}/-   {'NOPDB':>12}")
+            continue
         sym_parsed = parse_ini_output(r.sym_raw)
         nosym_parsed = parse_ini_output(r.nosym_raw)
 
@@ -250,10 +274,13 @@ def export_csv(results: list[CompareResult], output_path: str):
                          'Symbol', 'Nosymbol', 'Kind', 'Status'])
         for r in results:
             name = os.path.basename(r.path)
+            no_pdb = _is_no_pdb(r.path)
             if not r.success:
                 writer.writerow([name, '', '', '', '', '', '', '', f'ERROR: {r.error}'])
                 continue
-            if not r.diffs:
+            if no_pdb:
+                writer.writerow([name, r.version, r.arch, '', '', '', '', '', 'NOPDB'])
+            elif not r.diffs:
                 writer.writerow([name, r.version, r.arch, '', '', '', '', '', 'OK'])
             for d in r.diffs:
                 writer.writerow([name, r.version, r.arch,

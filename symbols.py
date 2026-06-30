@@ -154,10 +154,26 @@ def analyze(
         # --- 3. Symbol resolution ---
         _log("resolving symbols...", progress_callback)
 
-        su_rva = dbg.sym_rva("CUtils::IsSingleSessionPerUser")
-        if su_rva is None:
-            su_rva = dbg.sym_rva("CSessionArbitrationHelper::IsSingleSessionPerUserEnabled")
-        _log(f"symbol: IsSingleSessionPerUser = {(hex(su_rva) if su_rva is not None else None)}", progress_callback)
+        # Both symbols exist in all versions, but only one matches per version:
+        # - Old builds (10240/14393): no VerifyVersionInfoW IAT import →
+        #   CSAHelper's CMP [rbp],1 + JNZ pattern matches.
+        # - Modern builds (17134+): VerifyVersionInfoW IAT present →
+        #   CUtils's CALL [VerifyVersionInfoW] pattern matches.
+        su_candidate_rvas: list[tuple[str, int]] = []
+        for su_name in (
+            "CSessionArbitrationHelper::IsSingleSessionPerUserEnabled",
+            "CUtils::IsSingleSessionPerUser",
+        ):
+            rva = dbg.sym_rva(su_name)
+            if rva is not None:
+                su_candidate_rvas.append((su_name, rva))
+        _log(
+            f"symbol: IsSingleSessionPerUser candidates = "
+            + ", ".join(f"{n}=0x{r:X}" for n, r in su_candidate_rvas)
+            if su_candidate_rvas
+            else "symbol: IsSingleSessionPerUser = NOT FOUND",
+            progress_callback,
+        )
 
         dp_rva = dbg.sym_rva("CDefPolicy::Query")
         _log(f"symbol: CDefPolicy::Query = {(hex(dp_rva) if dp_rva is not None else None)}", progress_callback)
@@ -174,8 +190,10 @@ def analyze(
         lines: list[str] = [f"[{ver.to_ini_section()}]"]
 
         # --- 4. SingleUserPatch ---
-        if su_rva is not None:
-            _log(f"SingleUserPatch: scanning func RVA 0x{su_rva:X}", progress_callback)
+        su = None
+        su_used_rva: int | None = None
+        for su_name, su_rva in su_candidate_rvas:
+            _log(f"SingleUserPatch: scanning {su_name} RVA 0x{su_rva:X}", progress_callback)
             su = single_user_patch(
                 ctx,
                 start_rva=su_rva,
@@ -184,22 +202,27 @@ def analyze(
                 direct_call=False,
             )
             if su:
-                lines.extend(su.lines)
-                _log("SingleUserPatch: found", progress_callback)
-                for line in su.lines:
-                    _log(f"SingleUserPatch: {line}", progress_callback)
-                off_line = next((line for line in su.lines if line.startswith(f"SingleUserOffset.{arch}=")), "")
-                if off_line:
-                    try:
-                        off_rva = int(off_line.split("=", 1)[1], 16)
-                        _log_disasm_ctx_cb(ctx, func_start_rva=su_rva, target_rva=off_rva,
-                                           label="SingleUserPatch", callback=progress_callback,
-                                           decode_len=0x800, before=20, after=15)
-                    except Exception as e:
-                        _log(f"SingleUserPatch: disasm context parse failed: {e}", progress_callback)
-            else:
-                lines.append("ERROR: SingleUserPatch not found")
-                _log("SingleUserPatch: NOT found", progress_callback)
+                su_used_rva = su_rva
+                break
+            _log(f"SingleUserPatch: not found in {su_name}, trying next", progress_callback)
+
+        if su:
+            lines.extend(su.lines)
+            _log("SingleUserPatch: found", progress_callback)
+            for line in su.lines:
+                _log(f"SingleUserPatch: {line}", progress_callback)
+            off_line = next((line for line in su.lines if line.startswith(f"SingleUserOffset.{arch}=")), "")
+            if off_line:
+                try:
+                    off_rva = int(off_line.split("=", 1)[1], 16)
+                    _log_disasm_ctx_cb(ctx, func_start_rva=su_used_rva, target_rva=off_rva,
+                                       label="SingleUserPatch", callback=progress_callback,
+                                       decode_len=0x800, before=20, after=15)
+                except Exception as e:
+                    _log(f"SingleUserPatch: disasm context parse failed: {e}", progress_callback)
+        elif su_candidate_rvas:
+            lines.append("ERROR: SingleUserPatch not found")
+            _log("SingleUserPatch: NOT found", progress_callback)
         else:
             _log("SingleUserPatch: skipped (symbol not resolved)", progress_callback)
 

@@ -23,7 +23,7 @@ import pefile
 from iced_x86 import Decoder, Mnemonic, OpKind, Register
 
 from disasm import DisasmContext
-from exception_table import RuntimeFunction, backtrace_x64, parse_exception_directory_x64
+from exception_table import RuntimeFunction, backtrace_x64, find_function_bounds, parse_exception_directory_x64
 from patches import PatchResult, def_policy_patch, single_user_patch
 from nosymbol import _log_append
 
@@ -324,9 +324,9 @@ class X86Strategy:
         return var_rvas
 
 
-# ---------------------------------------------------------------------------
-# x64 strategy
-# ---------------------------------------------------------------------------
+    # ---------------------------------------------------------------------------
+    # x64 strategy
+    # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class X64Strategy:
@@ -359,12 +359,20 @@ class X64Strategy:
                 xref = _xref_lea_rip(image, image_base, 64, rf.begin_rva, func_len, target)
                 if not xref:
                     continue
-                top = backtrace_x64(image, rf)
-                addrs[key] = int(top.begin_rva)
-                func_sizes[key] = int(top.end_rva - top.begin_rva)
+                # Use find_function_bounds to handle split functions
+                # (Win8.1+ compilers may split a large function across
+                # multiple RuntimeFunction entries with INDIRECT/CHAININFO links).
+                # Returns (prologue_begin, data_begin, data_end):
+                #   prologue_begin — real function entry (for SLInitOffset)
+                #   data_begin     — earliest code in function (for scan range)
+                #   data_end       — latest code in function
+                prologue_begin, data_begin, data_end = find_function_bounds(image, runtime_funcs, rf)
+                addrs[key] = prologue_begin
+                addrs[f"_scan_{key}"] = data_begin  # scan start may differ from prologue
+                func_sizes[key] = data_end - data_begin
                 xrefs[key] = int(xref)
                 _log_append(log, f"xref found: {key} -> function RVA 0x{addrs[key]:X}")
-            if len(addrs) == len(targets):
+            if len([k for k in addrs if not k.startswith("_scan_")]) == len(targets):
                 break
 
         return addrs, func_sizes, xrefs

@@ -30,6 +30,7 @@ build-gui/
 
 # Symbol cache
 .symcache/
+cache/
 log/
 
 # Installer logs

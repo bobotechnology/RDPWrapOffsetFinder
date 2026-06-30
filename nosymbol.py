@@ -287,8 +287,8 @@ def _locate_strings(pe: pefile.PE, image: bytes) -> dict[str, int | None]:
     return {
         "CDefPolicy::Query": _find(b"CDefPolicy::Query"),
         "CSLQuery::IsTerminalTypeLocalOnly": _find(b"CSLQuery::IsTerminalTypeLocalOnly"),
-        "IsSingleSessionPerUserEnabled": _find(b"CSessionArbitrationHelper::IsSingleSessionPerUserEnabled")
-            or _find(b"IsSingleSessionPerUserEnabled"),
+        "IsSingleSessionPerUserEnabled": _find_exact(b"CSessionArbitrationHelper::IsSingleSessionPerUserEnabled")
+            or _find_exact(b"IsSingleSessionPerUserEnabled"),
         # Search order for GetInstanceOfTSLicense:
         # 1. Error message prefix (only referenced in the function that calls
         #    IsLicenseTypeLocalOnly — avoids ambiguity with other functions
@@ -338,10 +338,12 @@ def _apply_single_user_patch(
     su: PatchResult | None = None
     su_func_start: int | None = None
 
-    # Attempt 1: IsSingleSessionPerUserEnabled
-    start = addrs.get("IsSingleSessionPerUserEnabled") or addrs.get("IsSingleSessionPerUser")
+    # Attempt 1: CSAHelper::IsSingleSessionPerUserEnabled
+    # (preferred — works for both old versions without VerifyVersionInfoW
+    #  and modern versions that have it via IAT)
+    start = addrs.get("IsSingleSessionPerUserEnabled")
     if start is not None:
-        _log_append(log, f"SingleUser scan start RVA: 0x{int(start):X}")
+        _log_append(log, f"SingleUser scan start RVA (IsSingleSessionPerUserEnabled): 0x{int(start):X}")
         su = single_user_patch(
             ctx, start_rva=int(start),
             memset_target_rva=memset_iat,
@@ -351,17 +353,20 @@ def _apply_single_user_patch(
         if su is not None:
             su_func_start = int(start)
 
-    # Attempt 2: IsSingleSessionPerUser
-    if su is None and addrs.get("IsSingleSessionPerUser") is not None:
-        _log_append(log, f"SingleUser scan start RVA (IsSingleSessionPerUser): 0x{int(addrs['IsSingleSessionPerUser']):X}")
-        su = single_user_patch(
-            ctx, start_rva=int(addrs["IsSingleSessionPerUser"]),
-            memset_target_rva=memset_iat,
-            verifyversion_iat_rva=verify_iat,
-            direct_call=False,
-        )
-        if su is not None:
-            su_func_start = int(addrs["IsSingleSessionPerUser"])
+    # Attempt 2: CUtils::IsSingleSessionPerUser
+    # (packed wrapper — reachable only when CSAHelper fails or is absent)
+    if su is None:
+        start = addrs.get("IsSingleSessionPerUser")
+        if start is not None:
+            _log_append(log, f"SingleUser scan start RVA (IsSingleSessionPerUser): 0x{int(start):X}")
+            su = single_user_patch(
+                ctx, start_rva=int(start),
+                memset_target_rva=memset_iat,
+                verifyversion_iat_rva=verify_iat,
+                direct_call=False,
+            )
+            if su is not None:
+                su_func_start = int(start)
 
     # Attempt 3: exhaustive scan (architecture-specific preferred pattern)
     if su is None:
@@ -575,7 +580,9 @@ def _analyze_impl(
     # --- 5. SLInit hook + global variable scan ----------------------------
     csl_init_rva = addrs["CSLQuery_Initialize"]
     csl_init_len = func_sizes.get("CSLQuery_Initialize", 0x11000)
-    _log_append(log, f"SLInitHook: CSLQuery::Initialize RVA 0x{int(csl_init_rva):X}")
+    # scan_start may differ from csl_init_rva for split functions (e.g. 9600 x64)
+    csl_scan_start = addrs.get(f"_scan_CSLQuery_Initialize", csl_init_rva)
+    _log_append(log, f"SLInitHook: CSLQuery::Initialize RVA 0x{int(csl_init_rva):X} scan_from=0x{int(csl_scan_start):X}")
     _log_disasm_context(log, ctx, func_start_rva=int(csl_init_rva), target_rva=int(csl_init_rva),
                         label="SLInitHook", decode_len=0x200, before=0, after=10)
     lines.append(f"SLInitHook.{arch}=1")
@@ -593,7 +600,7 @@ def _analyze_impl(
             str_rvas[s] = int(rva)
 
     var_rvas = strat.scan_slinit_globals(
-        mem.image, mem.image_base, int(csl_init_rva), csl_init_len,
+        mem.image, mem.image_base, int(csl_scan_start), csl_init_len,
         str_rvas, _SLINIT_KEYS, log, ctx,
     )
 

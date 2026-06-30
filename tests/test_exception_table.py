@@ -190,3 +190,165 @@ def test_backtrace_handles_indirect_unwind_rva():
     func = RuntimeFunction(begin_rva=0x100, end_rva=0x200, unwind_rva=indirect_rva)
     result = backtrace_x64(bytes(image), func)
     assert result.begin_rva == func_b_begin
+
+
+# ---------------------------------------------------------------------------
+# _looks_like_prologue
+# ---------------------------------------------------------------------------
+
+from exception_table import _looks_like_prologue
+
+
+def test_looks_like_prologue_push_rbp():
+    """PUSH RBP (55) → True."""
+    image = b'\x55' + b'\x00' * 100
+    assert _looks_like_prologue(image, 0) is True
+
+
+def test_looks_like_prologue_mov_rsp_reg():
+    """MOV [RSP+18h], RBX (4C 89 5C 24 18) → True."""
+    image = b'\x4C\x89\x5C\x24\x18' + b'\x00' * 100
+    assert _looks_like_prologue(image, 0) is True
+
+
+def test_looks_like_prologue_rex_b_push_r12():
+    """REX.R + PUSH R12 (41 54) → True."""
+    image = b'\x41\x54' + b'\x00' * 100
+    assert _looks_like_prologue(image, 0) is True
+
+
+def test_looks_like_prologue_push_rbx():
+    """PUSH RBX (53) → True."""
+    image = b'\x53' + b'\x00' * 100
+    assert _looks_like_prologue(image, 0) is True
+
+
+def test_looks_like_prologue_not_prologue():
+    """OR ECX, 0FFFFFFFFh (83 C9 FF) — thunk → False."""
+    image = b'\x83\xC9\xFF' + b'\x00' * 100
+    assert _looks_like_prologue(image, 0) is False
+
+
+def test_looks_like_prologue_jmp_rel32():
+    """JMP rel32 (E9 xx xx xx xx) — not a prologue → False."""
+    image = b'\xE9\x00\x00\x00\x00' + b'\x00' * 100
+    assert _looks_like_prologue(image, 0) is False
+
+
+def test_looks_like_prologue_mov_rbp_rsp():
+    """MOV RBP, RSP (48 89 E5) → True (REX.W + 89 with modrm=REX.B+SP)."""
+    image = b'\x48\x89\xE5' + b'\x00' * 100
+    assert _looks_like_prologue(image, 0) is True
+
+
+def test_looks_like_prologue_sub_rsp_imm32():
+    """SUB RSP, imm32 (48 83 EC xx) → True."""
+    image = b'\x48\x83\xEC\x28' + b'\x00' * 100
+    assert _looks_like_prologue(image, 0) is True
+
+
+# ---------------------------------------------------------------------------
+# find_function_bounds — enhanced logic (thunk + separate prologue)
+# ---------------------------------------------------------------------------
+
+from exception_table import find_function_bounds, _PROLOGUE_SCAN_RANGE
+
+
+def _make_image_with_bytes(rva: int, data: bytes) -> bytes:
+    """Create a fake image where only the region around *rva* is populated."""
+    image = bytearray(0x100000)
+    image[rva:rva + len(data)] = data
+    return bytes(image)
+
+
+def test_find_function_bounds_terminal_is_real_prologue():
+    """Terminal looks like a prologue → use it directly as prologue_begin.
+    Returns 3-tuple (prologue_begin, data_begin, data_end)."""
+    image = bytearray(0x100000)
+    # Real prologue at 0x1000: PUSH RBP
+    image[0x1000] = 0x55
+    from exception_table import RuntimeFunction
+    real = RuntimeFunction(begin_rva=0x1000, end_rva=0x1200, unwind_rva=0x5000)
+    # Unwind info at 0x5000: no chain
+    image[0x5000:0x5004] = _unwind_info_bytes(flags=0, count_of_codes=0)
+
+    prologue_begin, data_begin, data_end = find_function_bounds(bytes(image), [real], real)
+    assert prologue_begin == 0x1000
+    assert data_begin == 0x1000
+    assert data_end == 0x1200
+
+
+def test_find_function_bounds_thunk_then_separate_prologue():
+    """Terminal is a thunk; real prologue is a separate RuntimeFunction entry
+    within _PROLOGUE_SCAN_RANGE.
+
+    Layout:
+      thunk_rf  (0x43870..0x43879, unwind at 0x5000) — not a prologue
+      real_rf     (0x554C0..0x57000, unwind at 0x6000) — PUSH RBP at 0x554C0
+
+    find_function_bounds should return:
+      prologue_begin = 0x554C0 (the real prologue)
+      data_begin = 0x43879 (right after thunk, earliest non-thunk code)
+      data_end >= 0x57000
+    """
+    image = bytearray(0x100000)
+
+    # Thunk unwind info at 0x5000 (no chain)
+    image[0x5000:0x5004] = _unwind_info_bytes(flags=0, count_of_codes=0)
+    # Real prologue unwind info at 0x6000 (no chain)
+    image[0x6000:0x6004] = _unwind_info_bytes(flags=0, count_of_codes=0)
+
+    # Real prologue: PUSH RBP at 0x554C0
+    image[0x554C0] = 0x55
+
+    from exception_table import RuntimeFunction
+    thunk_rf = RuntimeFunction(
+        begin_rva=0x43870, end_rva=0x43879,
+        unwind_rva=0x5000,
+    )
+    real_rf = RuntimeFunction(
+        begin_rva=0x554C0, end_rva=0x57000,
+        unwind_rva=0x6000,
+    )
+
+    prologue_begin, data_begin, data_end = find_function_bounds(
+        bytes(image), [thunk_rf, real_rf], thunk_rf,
+    )
+    assert prologue_begin == 0x554C0, (
+        f"Expected 0x554C0 (real prologue), got 0x{prologue_begin:X}"
+    )
+    # data_begin should skip the tiny thunk (size=9, not a prologue),
+    # giving us the end of the thunk as the start of real code.
+    assert data_begin == 0x43879, (
+        f"Expected 0x43879 (after thunk skip), got 0x{data_begin:X}"
+    )
+
+
+def test_find_function_bounds_family_scan():
+    """When terminal is small but family members include a prologue-like entry,
+    pick that family member as prologue_begin.  data_begin should skip thunks."""
+    image = bytearray(0x100000)
+    # Member 1 (thunk, not a prologue): OR ECX, 0FFFFFFFFh
+    image[0x43870] = 0x83
+    image[0x43871] = 0xC9
+    # Member 2 (real prologue): PUSH RBP
+    image[0x554C0] = 0x55
+
+    from exception_table import RuntimeFunction
+    thunk_rf = RuntimeFunction(
+        begin_rva=0x43870, end_rva=0x43879, unwind_rva=0x5000,
+    )
+    real_rf = RuntimeFunction(
+        begin_rva=0x554C0, end_rva=0x57000, unwind_rva=0x5000,
+    )
+    image[0x5000:0x5004] = _unwind_info_bytes(flags=0, count_of_codes=0)
+
+    # Both entries have the same unwind_rva, so backtrace_x64 returns the same
+    # terminal for both.  prologue_begin should be real_rf's begin_rva
+    # because it looks like a prologue and is closest to the terminal.
+    prologue_begin, data_begin, data_end = find_function_bounds(
+        bytes(image), [thunk_rf, real_rf], real_rf,
+    )
+    assert prologue_begin == 0x554C0, (
+        f"Expected 0x554C0 (prologue family member), got 0x{prologue_begin:X}"
+    )

@@ -418,7 +418,7 @@ class TestSingleUserPatch:
         assert any(line.startswith("SingleUserCode.x64=nop_") for line in r.lines)
 
     def test_verifyversion_only_x64(self):
-        """No memset CALL, but VerifyVersionInfoW CALL present → fallback path."""
+        """No memset CALL → no match (C++ requires memset CALL first)."""
         ctx = _build_image(64, self.FUNC, [
             nop(),
             self._iat_call_x64(self.VERIFY_IAT),
@@ -429,8 +429,7 @@ class TestSingleUserPatch:
             verifyversion_iat_rva=self.VERIFY_IAT,
             direct_call=False,
         )
-        assert r is not None
-        assert "SingleUserPatch.x64=1" in r.lines
+        assert r is None
 
     def test_no_relevant_calls_returns_none(self):
         """Neither memset nor VerifyVersionInfoW CALL → no match."""
