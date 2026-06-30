@@ -569,10 +569,16 @@ def _analyze_impl(
         return NoSymbolResult(text="\n".join(lines) + "\n")
 
     # LocalOnlyPatch
+    # Use _scan_ (data_begin) as the scan start — for split functions,
+    # the CALL to IsLicenseTypeLocalOnly may be before the prologue entry.
+    # Also use _scan_ for target — the CALL goes to the first RF begin
+    # (data_begin), not the prologue_begin which may be a later entry.
+    lo_scan_start = addrs.get("_scan_GetInstanceOfTSLicense", addrs["GetInstanceOfTSLicense"])
+    lo_target = addrs.get("_scan_IsLicenseTypeLocalOnly", addrs["IsLicenseTypeLocalOnly"])
     lo = local_only_patch(
         ctx,
-        start_rva=addrs["GetInstanceOfTSLicense"],
-        target_rva=addrs["IsLicenseTypeLocalOnly"],
+        start_rva=int(lo_scan_start),
+        target_rva=int(lo_target),
     )
     _emit_patch_result(log, ctx, lo, arch, "LocalOnlyPatch",
                        int(addrs["GetInstanceOfTSLicense"]), lines, decode_len=0x1200)
