@@ -271,9 +271,17 @@ def single_user_patch(
                     ])
                 # x86 CMP [ebp+N], 1 → nop_N
                 if x.mnemonic == Mnemonic.CMP and x.len <= 8 and x.op0_kind == OpKind.MEMORY and \
-                   x.memory_base == Register.EBP and x.op1_kind in (OpKind.IMMEDIATE8, OpKind.IMMEDIATE32):
-                    imm = x.immediate8 if x.op1_kind == OpKind.IMMEDIATE8 else x.immediate32
-                    if imm == 1:
+                   x.memory_base == Register.EBP:
+                    if x.op1_kind in (OpKind.IMMEDIATE8, OpKind.IMMEDIATE32):
+                        imm = x.immediate8 if x.op1_kind == OpKind.IMMEDIATE8 else x.immediate32
+                        if imm == 1:
+                            off_rva = int(x.ip - ctx.image_base)
+                            return PatchResult(lines=[
+                                "SingleUserPatch.x86=1",
+                                f"SingleUserOffset.x86={off_rva:X}",
+                                f"SingleUserCode.x86=nop_{x.len}",
+                            ])
+                    elif x.op1_kind == OpKind.REGISTER:
                         off_rva = int(x.ip - ctx.image_base)
                         return PatchResult(lines=[
                             "SingleUserPatch.x86=1",
