@@ -188,6 +188,7 @@ class X86Strategy:
         text_funcs = _scan_text_functions_x86(pe, image, ctx.image_base)
         best: PatchResult | None = None
         best_func_start: int | None = None
+        best_code: str = ""
         for begin_rva, end_rva in text_funcs:
             res = single_user_patch(
                 ctx, start_rva=begin_rva,
@@ -200,9 +201,14 @@ class X86Strategy:
             code_line = next((line for line in res.lines if line.startswith(f"SingleUserCode.{arch}=")), "")
             if "pop_eax_add_esp_12_nop_" in code_line:
                 return res, begin_rva
-            if best is None:
+            # Prefer nop_4 (CMP [ebp+N], 1 — immediate) over nop_3
+            # (CMP [ebp+N], reg).  The CSAHelper function typically uses
+            # CMP with immediate 1, while unrelated functions may use
+            # CMP with register.
+            if best is None or (code_line.endswith("=nop_4") and not best_code.endswith("=nop_4")):
                 best = res
                 best_func_start = begin_rva
+                best_code = code_line
         return best, best_func_start
 
     def find_def_policy_query(self, ctx, funcs, q_string_rva, image, image_base):
